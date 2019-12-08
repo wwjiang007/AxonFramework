@@ -1,11 +1,11 @@
 /*
- * Copyright (c) 2010-2018. Axon Framework
+ * Copyright (c) 2010-2019. Axon Framework
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *    http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -27,10 +27,14 @@ import org.axonframework.modelling.command.Repository;
 import org.axonframework.modelling.command.RepositoryProvider;
 import org.axonframework.modelling.command.inspection.AggregateModel;
 import org.axonframework.modelling.command.inspection.AnnotatedAggregateMetaModelFactory;
-import org.junit.*;
-import org.junit.runner.*;
-import org.mockito.*;
-import org.mockito.junit.*;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
+import org.mockito.Mock;
+import org.mockito.junit.jupiter.MockitoExtension;
+import org.mockito.junit.jupiter.MockitoSettings;
+import org.mockito.quality.Strictness;
 
 import java.util.Objects;
 import java.util.concurrent.Callable;
@@ -38,7 +42,7 @@ import java.util.concurrent.Callable;
 import static org.axonframework.commandhandling.GenericCommandMessage.asCommandMessage;
 import static org.axonframework.modelling.command.AggregateLifecycle.apply;
 import static org.axonframework.modelling.command.AggregateLifecycle.createNew;
-import static org.junit.Assert.*;
+import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.*;
 
@@ -47,11 +51,11 @@ import static org.mockito.Mockito.*;
  *
  * @author Milan Savic
  */
-@RunWith(MockitoJUnitRunner.class)
-public class SpawningNewAggregateTest {
+@ExtendWith(MockitoExtension.class)
+class SpawningNewAggregateTest {
 
-    @Spy
     private SimpleCommandBus commandBus;
+
     @Mock
     private Repository<Aggregate1> aggregate1Repository;
     @Mock
@@ -63,8 +67,8 @@ public class SpawningNewAggregateTest {
     private AggregateModel<Aggregate1> aggregate1Model;
 
     @SuppressWarnings("unchecked")
-    @Before
-    public void setUp() throws Exception {
+    @BeforeEach
+    void setUp() throws Exception {
         commandBus = SimpleCommandBus.builder().build();
 
         aggregate1Model = AnnotatedAggregateMetaModelFactory.inspectAggregate(Aggregate1.class);
@@ -97,7 +101,7 @@ public class SpawningNewAggregateTest {
 
     @SuppressWarnings("unchecked")
     @Test
-    public void testSpawningNewAggregate() throws Exception {
+    void testSpawningNewAggregate() throws Exception {
         initializeAggregate1Repository(repositoryProvider);
         commandBus.dispatch(asCommandMessage(new CreateAggregate1Command("id", "aggregate2Id")));
 
@@ -112,8 +116,9 @@ public class SpawningNewAggregateTest {
         assertEquals(new Aggregate1CreatedEvent("id"), eventCaptor.getAllValues().get(1).getPayload());
     }
 
+    @MockitoSettings(strictness = Strictness.LENIENT)
     @Test
-    public void testSpawningNewAggregateWhenThereIsNoRepositoryForIt() throws Exception {
+    void testSpawningNewAggregateWhenThereIsNoRepositoryForIt() throws Exception {
         initializeAggregate1Repository(repositoryProvider);
         when(repositoryProvider.repositoryFor(Aggregate2.class)).thenReturn(null);
         commandBus.dispatch(asCommandMessage(new CreateAggregate1Command("id", "aggregate2Id")),
@@ -130,8 +135,9 @@ public class SpawningNewAggregateTest {
                             });
     }
 
+    @MockitoSettings(strictness = Strictness.LENIENT)
     @Test
-    public void testSpawningNewAggregateWhenThereIsNoRepositoryProviderProvided() throws Exception {
+    void testSpawningNewAggregateWhenThereIsNoRepositoryProviderProvided() throws Exception {
         initializeAggregate1Repository(null);
         commandBus.dispatch(asCommandMessage(new CreateAggregate1Command("id", "aggregate2Id")),
                             (commandMessage, commandResultMessage) -> {
@@ -172,7 +178,7 @@ public class SpawningNewAggregateTest {
             return id;
         }
 
-        public String getAggregate2Id() {
+        String getAggregate2Id() {
             return aggregate2Id;
         }
     }
@@ -269,7 +275,7 @@ public class SpawningNewAggregateTest {
         public Aggregate2() {
         }
 
-        public Aggregate2(String id) {
+        Aggregate2(String id) {
             apply(new Aggregate2CreatedEvent(id));
         }
 

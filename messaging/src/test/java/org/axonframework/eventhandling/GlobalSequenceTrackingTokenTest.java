@@ -1,11 +1,11 @@
 /*
- * Copyright (c) 2010-2018. Axon Framework
+ * Copyright (c) 2010-2019. Axon Framework
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *    http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -18,7 +18,7 @@ package org.axonframework.eventhandling;
 
 import org.junit.Test;
 
-import static junit.framework.TestCase.assertSame;
+import static org.junit.Assert.*;
 
 public class GlobalSequenceTrackingTokenTest {
 
@@ -30,5 +30,33 @@ public class GlobalSequenceTrackingTokenTest {
         assertSame(token2, token1.upperBound(token2));
         assertSame(token2, token2.upperBound(token1));
         assertSame(token2, token2.upperBound(token2));
+    }
+
+    @Test
+    public void testLowerBound() {
+        GlobalSequenceTrackingToken token1 = new GlobalSequenceTrackingToken(1L);
+        GlobalSequenceTrackingToken token2 = new GlobalSequenceTrackingToken(2L);
+
+        assertSame(token1, token1.lowerBound(token2));
+        assertSame(token1, token2.lowerBound(token1));
+        assertSame(token2, token2.lowerBound(token2));
+    }
+
+    @Test
+    public void testCovers() {
+        GlobalSequenceTrackingToken token1 = new GlobalSequenceTrackingToken(1L);
+        GlobalSequenceTrackingToken token2 = new GlobalSequenceTrackingToken(2L);
+
+        assertFalse(token1.covers(token2));
+        assertTrue(token2.covers(token1));
+        assertTrue(token2.covers(token2));
+        assertTrue(token2.covers(null));
+    }
+
+    @Test
+    public void testPosition() {
+        GlobalSequenceTrackingToken token = new GlobalSequenceTrackingToken(1L);
+
+        assertEquals(1L, token.position().getAsLong());
     }
 }

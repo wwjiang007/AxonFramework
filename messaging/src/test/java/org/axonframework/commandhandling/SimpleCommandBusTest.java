@@ -1,11 +1,11 @@
 /*
- * Copyright (c) 2010-2018. Axon Framework
+ * Copyright (c) 2010-2019. Axon Framework
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *    http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -16,6 +16,7 @@
 
 package org.axonframework.commandhandling;
 
+import org.axonframework.commandhandling.callbacks.NoOpCallback;
 import org.axonframework.common.Registration;
 import org.axonframework.messaging.InterceptorChain;
 import org.axonframework.messaging.MessageHandler;
@@ -26,8 +27,11 @@ import org.axonframework.messaging.unitofwork.CurrentUnitOfWork;
 import org.axonframework.messaging.unitofwork.RollbackConfigurationType;
 import org.axonframework.messaging.unitofwork.UnitOfWork;
 import org.axonframework.monitoring.MessageMonitor;
-import org.junit.*;
-import org.mockito.*;
+import org.junit.After;
+import org.junit.Before;
+import org.junit.Test;
+import org.mockito.ArgumentCaptor;
+import org.mockito.InOrder;
 
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -92,6 +96,20 @@ public class SimpleCommandBusTest {
         assertFalse(CurrentUnitOfWork.isStarted());
         assertFalse(unitOfWork.get().isRolledBack());
         assertFalse(unitOfWork.get().isActive());
+    }
+
+    @Test
+    public void testFireAndForgetUsesDefaultCallback() {
+        CommandCallback<Object, Object> mockCallback = mock(CommandCallback.class);
+        testSubject = SimpleCommandBus.builder()
+                                      .defaultCommandCallback(mockCallback).build();
+
+        CommandMessage<Object> command = asCommandMessage("test");
+        testSubject.dispatch(command, NoOpCallback.INSTANCE);
+        verify(mockCallback, never()).onResult(any(), any());
+
+        testSubject.dispatch(command);
+        verify(mockCallback).onResult(eq(command), any());
     }
 
     @Test
@@ -319,6 +337,30 @@ public class SimpleCommandBusTest {
             assertEquals(command.getIdentifier(), commandResultMessage.getMetaData().get("correlationId"));
             assertEquals(command.getPayload(), commandResultMessage.getPayload());
         });
+    }
+
+    @Test
+    public void testDuplicateCommandHandlerResolverSetsTheExpectedHandler() {
+        DuplicateCommandHandlerResolver testDuplicateCommandHandlerResolver = DuplicateCommandHandlerResolution.silentOverride();
+        SimpleCommandBus testSubject =
+                SimpleCommandBus.builder()
+                                .duplicateCommandHandlerResolver(testDuplicateCommandHandlerResolver)
+                                .build();
+
+        MyStringCommandHandler initialHandler = spy(new MyStringCommandHandler());
+        MyStringCommandHandler duplicateHandler = spy(new MyStringCommandHandler());
+        CommandMessage<Object> testMessage = asCommandMessage("Say hi!");
+
+        // Subscribe the initial handler
+        testSubject.subscribe(String.class.getName(), initialHandler);
+        // Then, subscribe a duplicate
+        testSubject.subscribe(String.class.getName(), duplicateHandler);
+
+        // And after dispatching a test command, it should be handled by the initial handler
+        testSubject.dispatch(testMessage);
+
+        verify(duplicateHandler).handle(testMessage);
+        verify(initialHandler, never()).handle(testMessage);
     }
 
     private static class MyStringCommandHandler implements MessageHandler<CommandMessage<?>> {

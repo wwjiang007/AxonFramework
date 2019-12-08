@@ -42,6 +42,7 @@ import static java.util.Collections.synchronizedMap;
  *
  * @author Allard Buijze
  * @author Michael Bischoff
+ * @author Henrique Sena
  * @since 1.3
  */
 public class PessimisticLockFactory implements LockFactory {
@@ -109,9 +110,11 @@ public class PessimisticLockFactory implements LockFactory {
      * @param identifier the identifier of the lock to obtain.
      * @return a handle to release the lock. If the thread that releases the lock does not hold the lock
      * {@link IllegalMonitorStateException} is thrown
+     * {@link IllegalArgumentException} is thrown when identifier is null
      */
     @Override
     public Lock obtainLock(String identifier) {
+        Assert.nonNull(identifier, () -> "Aggregate identifier may not be null");
         boolean lockObtained = false;
         DisposableLock lock = null;
         while (!lockObtained) {
@@ -219,7 +222,7 @@ public class PessimisticLockFactory implements LockFactory {
         /**
          * Builds the PessimisticLockFactory instance using the properties defined in this builder
          *
-         * @return a fully configured PessimisticLockfactory instance
+         * @return a fully configured PessimisticLockFactory instance
          */
         public PessimisticLockFactory build() {
             return new PessimisticLockFactory(this);
@@ -263,7 +266,7 @@ public class PessimisticLockFactory implements LockFactory {
                         checkForDeadlock();
                         if (attempts < 1) {
                             throw new LockAcquisitionFailedException(
-                                    "Failed to acquire lock for aggregate identifier(" + identifier + "), maximum attempts exceeded (" + maximumQueued + ")"
+                                    "Failed to acquire lock for aggregate identifier(" + identifier + "), maximum attempts exceeded (" + acquireAttempts + ")"
                             );
                         }
                     } while (!lock.tryLock(lockAttemptTimeout, TimeUnit.MILLISECONDS));

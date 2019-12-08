@@ -1,11 +1,11 @@
 /*
- * Copyright (c) 2010-2018. Axon Framework
+ * Copyright (c) 2010-2019. Axon Framework
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *    http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -16,12 +16,9 @@
 
 package org.axonframework.config;
 
-import org.axonframework.commandhandling.AnnotationCommandHandlerAdapter;
-import org.axonframework.commandhandling.CommandBus;
-import org.axonframework.commandhandling.SimpleCommandBus;
+import org.axonframework.commandhandling.*;
 import org.axonframework.commandhandling.gateway.CommandGateway;
 import org.axonframework.commandhandling.gateway.DefaultCommandGateway;
-import org.axonframework.modelling.command.Repository;
 import org.axonframework.common.Assert;
 import org.axonframework.common.AxonConfigurationException;
 import org.axonframework.common.IdentifierFactory;
@@ -34,9 +31,8 @@ import org.axonframework.deadline.DeadlineManager;
 import org.axonframework.deadline.SimpleDeadlineManager;
 import org.axonframework.eventhandling.EventBus;
 import org.axonframework.eventhandling.SimpleEventBus;
-import org.axonframework.modelling.saga.ResourceInjector;
-import org.axonframework.modelling.saga.repository.SagaStore;
-import org.axonframework.modelling.saga.repository.jpa.JpaSagaStore;
+import org.axonframework.eventhandling.gateway.DefaultEventGateway;
+import org.axonframework.eventhandling.gateway.EventGateway;
 import org.axonframework.eventhandling.tokenstore.TokenStore;
 import org.axonframework.eventhandling.tokenstore.jpa.JpaTokenStore;
 import org.axonframework.eventsourcing.eventstore.EmbeddedEventStore;
@@ -48,6 +44,10 @@ import org.axonframework.messaging.annotation.*;
 import org.axonframework.messaging.correlation.CorrelationDataProvider;
 import org.axonframework.messaging.correlation.MessageOriginProvider;
 import org.axonframework.messaging.interceptors.CorrelationDataInterceptor;
+import org.axonframework.modelling.command.Repository;
+import org.axonframework.modelling.saga.ResourceInjector;
+import org.axonframework.modelling.saga.repository.SagaStore;
+import org.axonframework.modelling.saga.repository.jpa.JpaSagaStore;
 import org.axonframework.monitoring.MessageMonitor;
 import org.axonframework.queryhandling.*;
 import org.axonframework.queryhandling.annotation.AnnotationQueryHandlerAdapter;
@@ -105,11 +105,11 @@ public class DefaultConfigurer implements Configurer {
             c -> new EventUpcasterChain(upcasters.stream().map(Component::get).collect(toList()))
     );
 
-    private final Component<Function<Class, HandlerDefinition>> handlerDefinition = new Component<>(
+    private final Component<Function<Class<?>, HandlerDefinition>> handlerDefinition = new Component<>(
             config, "handlerDefinition",
             c -> this::defaultHandlerDefinition);
 
-    private final Map<Class<?>, AggregateConfiguration> aggregateConfigurations = new HashMap<>();
+    private final Map<Class<?>, AggregateConfiguration<?>> aggregateConfigurations = new HashMap<>();
 
     private final List<ConsumerHandler> initHandlers = new ArrayList<>();
     private final List<RunnableHandler> startHandlers = new ArrayList<>();
@@ -227,6 +227,8 @@ public class DefaultConfigurer implements Configurer {
                        new Component<>(config, "resourceInjector", this::defaultResourceInjector));
         components.put(DeadlineManager.class, new Component<>(config, "deadlineManager", this::defaultDeadlineManager));
         components.put(EventUpcaster.class, upcasterChain);
+        components.put(EventGateway.class, new Component<>(config, "eventGateway", this::defaultEventGateway));
+        components.put(TagsConfiguration.class, new Component<>(config, "tags", c -> new TagsConfiguration()));
     }
 
     /**
@@ -316,6 +318,8 @@ public class DefaultConfigurer implements Configurer {
                 SimpleCommandBus.builder()
                                 .transactionManager(config.getComponent(TransactionManager.class,
                                                                         () -> NoTransactionManager.INSTANCE))
+                                .duplicateCommandHandlerResolver(config.getComponent(DuplicateCommandHandlerResolver.class,
+                                                                                     LoggingDuplicateCommandHandlerResolver::instance))
                                 .messageMonitor(config.messageMonitor(SimpleCommandBus.class, "commandBus"))
                                 .build();
         commandBus.registerHandlerInterceptor(new CorrelationDataInterceptor<>(config.correlationDataProviders()));
@@ -354,6 +358,17 @@ public class DefaultConfigurer implements Configurer {
         return SimpleEventBus.builder()
                              .messageMonitor(config.messageMonitor(EventBus.class, "eventBus"))
                              .build();
+    }
+
+    /**
+     * Returns a {@link DefaultEventGateway} that will use the configuration's {@link EventBus} to publish
+     * events.
+     *
+     * @param config The configuration that supplies the event bus.
+     * @return The default event gateway.
+     */
+    protected EventGateway defaultEventGateway(Configuration config) {
+        return DefaultEventGateway.builder().eventBus(config.eventBus()).build();
     }
 
     /**
@@ -443,7 +458,7 @@ public class DefaultConfigurer implements Configurer {
             Object handler = annotatedCommandHandlerBuilder.apply(config);
             Assert.notNull(handler, () -> "annotatedCommandHandler may not be null");
             Registration registration =
-                    new AnnotationCommandHandlerAdapter(handler,
+                    new AnnotationCommandHandlerAdapter<>(handler,
                                                         config.parameterResolverFactory(),
                                                         config.handlerDefinition(handler.getClass()))
                             .subscribe(config.commandBus());
@@ -453,13 +468,12 @@ public class DefaultConfigurer implements Configurer {
     }
 
     @Override
-    @SuppressWarnings("unchecked")
     public Configurer registerQueryHandler(int phase, Function<Configuration, Object> annotatedQueryHandlerBuilder) {
         startHandlers.add(new RunnableHandler(phase, () -> {
             Object annotatedHandler = annotatedQueryHandlerBuilder.apply(config);
             Assert.notNull(annotatedHandler, () -> "annotatedQueryHandler may not be null");
 
-            Registration registration = new AnnotationQueryHandlerAdapter(annotatedHandler,
+            Registration registration = new AnnotationQueryHandlerAdapter<>(annotatedHandler,
                                                                           config.parameterResolverFactory(),
                                                                           config.handlerDefinition(annotatedHandler
                                                                                                            .getClass()))
@@ -643,7 +657,7 @@ public class DefaultConfigurer implements Configurer {
         @SuppressWarnings("unchecked")
         public <T> Repository<T> repository(Class<T> aggregateType) {
             AggregateConfiguration<T> aggregateConfigurer =
-                    DefaultConfigurer.this.aggregateConfigurations.get(aggregateType);
+                    (AggregateConfiguration<T>) DefaultConfigurer.this.aggregateConfigurations.get(aggregateType);
             if (aggregateConfigurer == null) {
                 throw new IllegalArgumentException(
                         "Aggregate " + aggregateType.getSimpleName() + " has not been configured");

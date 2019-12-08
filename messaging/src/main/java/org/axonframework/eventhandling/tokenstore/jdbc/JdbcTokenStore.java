@@ -1,11 +1,11 @@
 /*
- * Copyright (c) 2010-2018. Axon Framework
+ * Copyright (c) 2010-2019. Axon Framework
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *    http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -19,11 +19,8 @@ package org.axonframework.eventhandling.tokenstore.jdbc;
 import org.axonframework.common.AxonConfigurationException;
 import org.axonframework.common.jdbc.ConnectionProvider;
 import org.axonframework.common.jdbc.JdbcException;
-import org.axonframework.eventhandling.tokenstore.AbstractTokenEntry;
-import org.axonframework.eventhandling.tokenstore.GenericTokenEntry;
-import org.axonframework.eventhandling.tokenstore.TokenStore;
-import org.axonframework.eventhandling.tokenstore.UnableToClaimTokenException;
 import org.axonframework.eventhandling.TrackingToken;
+import org.axonframework.eventhandling.tokenstore.*;
 import org.axonframework.serialization.Serializer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -63,6 +60,20 @@ public class JdbcTokenStore implements TokenStore {
     private final Class<?> contentType;
 
     /**
+     * Instantiate a Builder to be able to create a {@link JdbcTokenStore}.
+     * <p>
+     * The {@code schema} is defaulted to an {@link TokenSchema}, the {@code claimTimeout} to a 10 seconds duration,
+     * {@code nodeId} is defaulted to the name of the managed bean for the runtime system of the Java virtual machine
+     * and the {@code contentType} to a {@code byte[]} {@link Class}. The {@link ConnectionProvider} and
+     * {@link Serializer} are <b>hard requirements</b> and as such should be provided.
+     *
+     * @return a Builder to be able to create a {@link JdbcTokenStore}
+     */
+    public static Builder builder() {
+        return new Builder();
+    }
+
+    /**
      * Instantiate a {@link JdbcTokenStore} based on the fields contained in the {@link Builder}.
      * <p>
      * Will assert that the {@link ConnectionProvider}, {@link Serializer}, {@link TokenSchema}, {@code claimTimeout},
@@ -79,20 +90,6 @@ public class JdbcTokenStore implements TokenStore {
         this.claimTimeout = builder.claimTimeout;
         this.nodeId = builder.nodeId;
         this.contentType = builder.contentType;
-    }
-
-    /**
-     * Instantiate a Builder to be able to create a {@link JdbcTokenStore}.
-     * <p>
-     * The {@code schema} is defaulted to an {@link TokenSchema}, the {@code claimTimeout} to a 10 seconds duration,
-     * {@code nodeId} is defaulted to the name of the managed bean for the runtime system of the Java virtual machine
-     * and the {@code contentType} to a {@code byte[]} {@link Class}. The {@link ConnectionProvider} and
-     * {@link Serializer} are <b>hard requirements</b> and as such should be provided.
-     *
-     * @return a Builder to be able to create a {@link JdbcTokenStore}
-     */
-    public static Builder builder() {
-        return new Builder();
     }
 
     /**
@@ -125,10 +122,7 @@ public class JdbcTokenStore implements TokenStore {
                          c -> selectForUpdate(c, processorName, 0),
                          resultSet -> {
                              for (int segment = 0; segment < segmentCount; segment++) {
-                                 insertTokenEntry(resultSet, initialToken, processorName, segment);
-                             }
-                             if (!connection.getAutoCommit()) {
-                                 connection.commit();
+                                 insertTokenEntry(connection, initialToken, processorName, segment);
                              }
                              return null;
                          },
@@ -141,16 +135,36 @@ public class JdbcTokenStore implements TokenStore {
     }
 
     @Override
+    public void initializeSegment(TrackingToken token, String processorName, int segment) throws UnableToInitializeTokenException {
+        Connection connection = getConnection();
+        try {
+            executeQuery(connection,
+                         c -> selectForUpdate(c, processorName, 0),
+                         resultSet -> {
+                             insertTokenEntry(connection, token, processorName, segment);
+                             return null;
+                         },
+                         e -> new UnableToInitializeTokenException(
+                                 "Could not initialize segments. Some segments were already present.", e
+                         ));
+        } finally {
+            closeQuietly(connection);
+        }
+    }
+
+    @Override
+    public boolean requiresExplicitSegmentInitialization() {
+        return true;
+    }
+
+    @Override
     public void storeToken(TrackingToken token, String processorName, int segment) throws UnableToClaimTokenException {
         Connection connection = getConnection();
         try {
             executeQuery(connection,
                          c -> selectForUpdate(c, processorName, segment),
                          resultSet -> {
-                             insertOrUpdateToken(resultSet, token, processorName, segment);
-                             if (!connection.getAutoCommit()) {
-                                 connection.commit();
-                             }
+                             updateToken(connection, resultSet, token, processorName, segment);
                              return null;
                          },
                          e -> new JdbcException(format("Could not store token [%s] for processor [%s] and segment [%d]",
@@ -164,14 +178,11 @@ public class JdbcTokenStore implements TokenStore {
     public TrackingToken fetchToken(String processorName, int segment) throws UnableToClaimTokenException {
         Connection connection = getConnection();
         try {
-            return executeQuery(connection, c -> selectForUpdate(c, processorName, segment), resultSet -> {
-                TrackingToken result = loadOrInsertToken(resultSet, processorName, segment);
-                if (!connection.getAutoCommit()) {
-                    connection.commit();
-                }
-                return result;
-            }, e -> new JdbcException(
-                    format("Could not load token for processor [%s] and segment [%d]", processorName, segment), e));
+            return executeQuery(connection, c -> selectForUpdate(c, processorName, segment),
+                                resultSet -> loadToken(connection, resultSet, processorName, segment),
+                                e -> new JdbcException(
+                                        format("Could not load token for processor [%s] and segment [%d]",
+                                               processorName, segment), e));
         } finally {
             closeQuietly(connection);
         }
@@ -187,17 +198,28 @@ public class JdbcTokenStore implements TokenStore {
                                                              processorName, segment), e);
                                           },
                                           c -> releaseClaim(c, processorName, segment));
-            try {
-                if (!connection.isClosed() && !connection.getAutoCommit()) {
-                    connection.commit();
-                }
-            } catch (SQLException e) {
-                // ignore
-            }
             if (result[0] < 1) {
                 logger.warn(
                         "Releasing claim of token {}/{} failed. It was owned by another node.", processorName, segment
                 );
+            }
+        } finally {
+            closeQuietly(connection);
+        }
+    }
+
+    @Override
+    public void deleteToken(String processorName, int segment) {
+        Connection connection = getConnection();
+        try {
+            int[] result = executeUpdates(connection, e -> {
+                                              throw new JdbcException(
+                                                      format("Could not remove token for processor [%s] and segment " + "[%d]",
+                                                             processorName, segment), e);
+                                          },
+                                          c -> deleteToken(c, processorName, segment));
+            if (result[0] < 1) {
+                throw new UnableToClaimTokenException("Unable to claim token. It wasn't owned by " + nodeId);
             }
         } finally {
             closeQuietly(connection);
@@ -228,7 +250,6 @@ public class JdbcTokenStore implements TokenStore {
      * @param connection    the connection to the underlying database
      * @param processorName the name of the processor to fetch the segments for
      * @return a {@link PreparedStatement} that will fetch segments when executed
-     *
      * @throws SQLException when an exception occurs while creating the prepared statement
      */
     protected PreparedStatement selectForSegments(Connection connection, String processorName) throws SQLException {
@@ -249,7 +270,6 @@ public class JdbcTokenStore implements TokenStore {
      * @param processorName the name of the processor to fetch the entry for
      * @param segment       the segment of the processor to fetch the entry for
      * @return a {@link PreparedStatement} that will fetch an updatable token entry when executed
-     *
      * @throws SQLException when an exception occurs while creating the prepared statement
      */
     protected PreparedStatement selectForUpdate(Connection connection, String processorName,
@@ -259,17 +279,17 @@ public class JdbcTokenStore implements TokenStore {
                             schema.tokenTypeColumn(), schema.timestampColumn(), schema.ownerColum()) + " FROM " +
                 schema.tokenTable() + " WHERE " + schema.processorNameColumn() + " = ? AND " + schema.segmentColumn() +
                 " = ? FOR UPDATE";
-        PreparedStatement preparedStatement =
-                connection.prepareStatement(sql, ResultSet.TYPE_FORWARD_ONLY, ResultSet.CONCUR_UPDATABLE);
+        PreparedStatement preparedStatement = connection.prepareStatement(sql);
         preparedStatement.setString(1, processorName);
         preparedStatement.setInt(2, segment);
         return preparedStatement;
     }
 
     /**
-     * If the given {@code resultSet} has no items this method should insert a new token entry. If a token already
-     * exists it should be attempted to replace the token in the entry with the given {@code token} and claim ownership.
+     * If the given {@code resultSet} has an entry, attempts to replace the token in the entry with the given
+     * {@code token} and claim ownership.
      *
+     * @param connection    the connection to the underlying database
      * @param resultSet     the updatable query result set of an executed {@link PreparedStatement}
      * @param token         the token for the new or updated entry
      * @param processorName the name of the processor owning the token
@@ -277,17 +297,37 @@ public class JdbcTokenStore implements TokenStore {
      * @throws UnableToClaimTokenException if the token cannot be claimed because another node currently owns the token
      * @throws SQLException                when an exception occurs while updating the result set
      */
-    protected void insertOrUpdateToken(ResultSet resultSet, TrackingToken token, String processorName,
-                                       int segment) throws SQLException {
+    protected void updateToken(Connection connection, ResultSet resultSet, TrackingToken token, String processorName,
+                               int segment) throws SQLException {
+        final String sql = "UPDATE " + schema.tokenTable() + " SET " + schema.ownerColum() + " = ?, " +
+                schema.tokenColumn() + " = ?, " + schema.tokenTypeColumn() + " = ?, " + schema.timestampColumn() +
+                " = ? WHERE " + schema.processorNameColumn() + " = ? AND " + schema.segmentColumn() + " = ?";
         if (resultSet.next()) {
             AbstractTokenEntry<?> entry = readTokenEntry(resultSet);
             entry.updateToken(token, serializer);
-            resultSet.updateObject(schema.tokenColumn(), entry.getSerializedToken().getData());
-            resultSet.updateString(schema.tokenTypeColumn(), entry.getSerializedToken().getType().getName());
-            resultSet.updateString(schema.timestampColumn(), entry.timestampAsString());
-            claimToken(resultSet, entry);
+
+            if (!entry.claim(nodeId, claimTimeout)) {
+                throw new UnableToClaimTokenException(
+                        format("Unable to claim token '%s[%s]'. It is owned by '%s'", entry.getProcessorName(),
+                                entry.getSegment(), entry.getOwner()));
+            }
+
+            try (PreparedStatement preparedStatement = connection.prepareStatement(sql)) {
+                preparedStatement.setString(1, entry.getOwner());
+                preparedStatement.setObject(2, entry.getSerializedToken().getData());
+                preparedStatement.setString(3, entry.getSerializedToken().getType().getName());
+                preparedStatement.setString(4, entry.timestampAsString());
+                preparedStatement.setString(5, processorName);
+                preparedStatement.setInt(6, segment);
+                if (preparedStatement.executeUpdate() != 1) {
+                    throw new UnableToClaimTokenException(format("Unable to claim token '%s[%s]'. It has been removed",
+                            processorName, segment));
+                }
+            }
         } else {
-            insertTokenEntry(resultSet, token, processorName, segment);
+            throw new UnableToClaimTokenException(
+                    format("Unable to claim token '%s[%s]'. It has not been initialized yet",
+                            processorName, segment));
         }
     }
 
@@ -295,22 +335,34 @@ public class JdbcTokenStore implements TokenStore {
      * Tries to claim the given token {@code entry}. If the claim fails an {@link UnableToClaimTokenException} should be
      * thrown. Otherwise the given {@code resultSet} should be updated to reflect the claim.
      *
-     * @param resultSet the updatable query result of an executed {@link PreparedStatement}
-     * @param entry     the entry extracted from the given result set
+     * @param connection the connection to the underlying database
+     * @param entry      the entry extracted from the given result set
      * @return the claimed tracking token
-     *
      * @throws UnableToClaimTokenException if the token cannot be claimed because another node currently owns the token
      * @throws SQLException                when an exception occurs while claiming the token entry
      */
-    protected TrackingToken claimToken(ResultSet resultSet, AbstractTokenEntry<?> entry) throws SQLException {
+    protected TrackingToken claimToken(Connection connection, AbstractTokenEntry<?> entry) throws SQLException {
+        final String sql = "UPDATE " + schema.tokenTable() + " SET " + schema.ownerColum() + " = ?, " +
+                schema.timestampColumn() + " = ? WHERE " + schema.processorNameColumn() + " = ? AND " +
+                schema.segmentColumn() + " = ?";
         if (!entry.claim(nodeId, claimTimeout)) {
             throw new UnableToClaimTokenException(
                     format("Unable to claim token '%s[%s]'. It is owned by '%s'", entry.getProcessorName(),
                            entry.getSegment(), entry.getOwner()));
         }
-        resultSet.updateString(schema.ownerColum(), entry.getOwner());
-        resultSet.updateString(schema.timestampColumn(), entry.timestampAsString());
-        resultSet.updateRow();
+
+        try (PreparedStatement preparedStatement = connection.prepareStatement(sql)) {
+            preparedStatement.setString(1, entry.getOwner());
+            preparedStatement.setString(2, entry.timestampAsString());
+            preparedStatement.setString(3, entry.getProcessorName());
+            preparedStatement.setInt(4, entry.getSegment());
+            if (preparedStatement.executeUpdate() != 1) {
+                throw new UnableToClaimTokenException(
+                        format("Unable to claim token '%s[%s]'. It has been removed", entry.getProcessorName(),
+                                entry.getSegment()));
+            }
+        }
+
         return entry.getToken(serializer);
     }
 
@@ -322,46 +374,51 @@ public class JdbcTokenStore implements TokenStore {
      * If no such token exists yet, a new token entry will be inserted with {@code null} token owned by this node and
      * return {@code null}.
      *
+     * @param connection    the connection to the underlying database
      * @param resultSet     the updatable result set from a prior select for update query
      * @param processorName the name of the processor to load or insert a token entry for
      * @param segment       the segment of the processor to load or insert a token entry for
      * @return the tracking token of the fetched entry or {@code null} if a new entry was inserted
-     *
      * @throws UnableToClaimTokenException if the token cannot be claimed because another node currently owns the token
      * @throws SQLException                when an exception occurs while loading or inserting the entry
      */
-    protected TrackingToken loadOrInsertToken(ResultSet resultSet, String processorName,
-                                              int segment) throws SQLException {
+    protected TrackingToken loadToken(Connection connection, ResultSet resultSet, String processorName,
+                                      int segment) throws SQLException {
         if (!resultSet.next()) {
-            return insertTokenEntry(resultSet, null, processorName, segment);
+            throw new UnableToClaimTokenException(
+                    format("Unable to claim token '%s[%s]'. It has not been initialized yet", processorName,
+                           segment));
         }
-        return claimToken(resultSet, readTokenEntry(resultSet));
+        return claimToken(connection, readTokenEntry(resultSet));
     }
 
     /**
      * Inserts a new token entry via the given updatable {@code resultSet}.
      *
-     * @param resultSet     the updatable result set to add the entry to
+     * @param connection    the connection to the underlying database
      * @param token         the token of the entry to insert
      * @param processorName the name of the processor to insert a token for
      * @param segment       the segment of the processor to insert a token for
      * @return the tracking token of the inserted entry
-     *
      * @throws SQLException when an exception occurs while inserting a token entry
      */
-    protected TrackingToken insertTokenEntry(ResultSet resultSet, TrackingToken token, String processorName,
+    protected TrackingToken insertTokenEntry(Connection connection, TrackingToken token, String processorName,
                                              int segment) throws SQLException {
+        final String sql = "INSERT INTO " + schema.tokenTable() + " (" + schema.processorNameColumn() + "," +
+                schema.segmentColumn() + "," + schema.timestampColumn() + "," + schema.tokenColumn() + "," +
+                schema.tokenTypeColumn() + "," + schema.ownerColum() + ") VALUES (?,?,?,?,?,?)";
         AbstractTokenEntry<?> entry = new GenericTokenEntry<>(token, serializer, contentType, processorName, segment);
-        entry.claim(nodeId, claimTimeout);
-        resultSet.moveToInsertRow();
-        resultSet.updateObject(schema.tokenColumn(), token == null ? null : entry.getSerializedToken().getData());
-        resultSet.updateString(schema.tokenTypeColumn(),
-                               token == null ? null : entry.getSerializedToken().getType().getName());
-        resultSet.updateString(schema.timestampColumn(), entry.timestampAsString());
-        resultSet.updateString(schema.ownerColum(), entry.getOwner());
-        resultSet.updateString(schema.processorNameColumn(), processorName);
-        resultSet.updateInt(schema.segmentColumn(), segment);
-        resultSet.insertRow();
+
+        try (PreparedStatement preparedStatement = connection.prepareStatement(sql)) {
+            preparedStatement.setString(1, processorName);
+            preparedStatement.setInt(2, segment);
+            preparedStatement.setString(3, entry.timestampAsString());
+            preparedStatement.setObject(4, token == null ? null : entry.getSerializedToken().getData());
+            preparedStatement.setString(5, token == null ? null : entry.getSerializedToken().getType().getName());
+            preparedStatement.setString(6, entry.getOwner());
+            preparedStatement.executeUpdate();
+        }
+
         return token;
     }
 
@@ -370,7 +427,6 @@ public class JdbcTokenStore implements TokenStore {
      *
      * @param resultSet the result set of a prior select statement containing a single token entry
      * @return an token entry with data extracted from the result set
-     *
      * @throws SQLException if the result set cannot be converted to an entry
      */
     protected AbstractTokenEntry<?> readTokenEntry(ResultSet resultSet) throws SQLException {
@@ -390,7 +446,6 @@ public class JdbcTokenStore implements TokenStore {
      * @param processorName the name of the processor for which to release this node's claim
      * @param segment       the segment of the processor for which to release this node's claim
      * @return a {@link PreparedStatement} that will release the claim this node has on the token entry
-     *
      * @throws SQLException if the statement to release a claim cannot be created
      */
     protected PreparedStatement releaseClaim(Connection connection, String processorName,
@@ -409,13 +464,36 @@ public class JdbcTokenStore implements TokenStore {
     }
 
     /**
+     * Creates a new {@link PreparedStatement} to release the current claim this node has on a token belonging to a
+     * processor with given {@code processorName} and {@code segment}.
+     *
+     * @param connection    the connection that should be used to create a {@link PreparedStatement}
+     * @param processorName the name of the processor for which to release this node's claim
+     * @param segment       the segment of the processor for which to release this node's claim
+     * @return a {@link PreparedStatement} that will release the claim this node has on the token entry
+     * @throws SQLException if the statement to release a claim cannot be created
+     */
+    protected PreparedStatement deleteToken(Connection connection, String processorName,
+                                            int segment) throws SQLException {
+        final String sql =
+                "DELETE FROM " + schema.tokenTable() +
+                        " WHERE " + schema.processorNameColumn() + " = ? AND " + schema.segmentColumn() +
+                        " = ? AND " + schema.ownerColum() + " = ?";
+        PreparedStatement preparedStatement = connection.prepareStatement(sql);
+        preparedStatement.setString(1, processorName);
+        preparedStatement.setInt(2, segment);
+        preparedStatement.setString(3, nodeId);
+        return preparedStatement;
+    }
+
+
+    /**
      * Returns the serialized token data from the given {@code resultSet} at given {@code columnName}.
      *
      * @param resultSet  the result set to get serialized data from
      * @param columnName the name of the column containing the serialized token
      * @param <T>        the type of data to return
      * @return the serialized data of the token
-     *
      * @throws SQLException if the token cannot be read from the entry
      */
     @SuppressWarnings("unchecked")

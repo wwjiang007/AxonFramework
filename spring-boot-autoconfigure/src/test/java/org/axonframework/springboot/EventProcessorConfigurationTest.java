@@ -27,8 +27,7 @@ import org.axonframework.eventhandling.SimpleEventHandlerInvoker;
 import org.axonframework.eventhandling.TrackingEventProcessor;
 import org.axonframework.eventhandling.async.FullConcurrencyPolicy;
 import org.axonframework.eventhandling.async.SequencingPolicy;
-import org.junit.*;
-import org.junit.runner.*;
+import org.junit.jupiter.api.*;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.autoconfigure.EnableAutoConfiguration;
 import org.springframework.boot.autoconfigure.jdbc.DataSourceAutoConfiguration;
@@ -41,13 +40,12 @@ import org.springframework.context.annotation.EnableMBeanExport;
 import org.springframework.jmx.support.RegistrationPolicy;
 import org.springframework.stereotype.Component;
 import org.springframework.test.context.TestPropertySource;
-import org.springframework.test.context.junit4.SpringRunner;
 
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 
 import static org.axonframework.common.ReflectionUtils.ensureAccessible;
-import static org.junit.Assert.*;
+import static org.junit.jupiter.api.Assertions.*;
 
 @SpringBootTest
 @TestPropertySource("classpath:test-processors.application.properties")
@@ -56,7 +54,6 @@ import static org.junit.Assert.*;
         WebClientAutoConfiguration.class,
         DataSourceAutoConfiguration.class
 })
-@RunWith(SpringRunner.class)
 @EnableMBeanExport(registration = RegistrationPolicy.IGNORE_EXISTING)
 public class EventProcessorConfigurationTest {
 
@@ -67,19 +64,34 @@ public class EventProcessorConfigurationTest {
     private SequencingPolicy expectedPolicy;
 
     @Test
-    public void testPublishSomeEvents() throws Exception {
+    void testPublishSomeEvents() throws Exception {
         Map<String, EventProcessor> processors = eventProcessingConfiguration.eventProcessors();
-        assertEquals(2, processors.size());
-        assertEquals(TrackingEventProcessor.class, processors.get("first").getClass());
+        assertEquals(3, processors.size());
+        EventProcessor eventProcessor = processors.get("first");
+        assertNotNull(eventProcessor);
+        assertEquals(TrackingEventProcessor.class, eventProcessor.getClass());
+        long tokenClaimInterval = ReflectionUtils.getFieldValue(TrackingEventProcessor.class.getDeclaredField("tokenClaimInterval"), eventProcessor);
+        assertEquals(5000L, tokenClaimInterval, "Must be 5000 ms by default");
         MultiEventHandlerInvoker invoker = (MultiEventHandlerInvoker) ensureAccessible(
                 AbstractEventProcessor.class.getDeclaredMethod("eventHandlerInvoker")
-        ).invoke(processors.get("first"));
+        ).invoke(eventProcessor);
         SimpleEventHandlerInvoker simpleEventHandlerInvoker = (SimpleEventHandlerInvoker) invoker.delegates().get(0);
         SequencingPolicy policy = ReflectionUtils.getFieldValue(
                 SimpleEventHandlerInvoker.class.getDeclaredField("sequencingPolicy"), simpleEventHandlerInvoker
         );
 
         assertEquals(expectedPolicy, policy);
+    }
+
+    @Test
+    void verifyTokenClaimIntervalCanBeSetViaSpringConfiguration() throws Exception {
+        Map<String, EventProcessor> processors = eventProcessingConfiguration.eventProcessors();
+        assertEquals(3, processors.size());
+        EventProcessor eventProcessor = processors.get("non_default_token_claim_interval");
+        assertNotNull(eventProcessor);
+        assertEquals(TrackingEventProcessor.class, eventProcessor.getClass());
+        long tokenClaimInterval = ReflectionUtils.getFieldValue(TrackingEventProcessor.class.getDeclaredField("tokenClaimInterval"), eventProcessor);
+        assertEquals(60000000L, tokenClaimInterval, "It must be possible to override token claim interval via Spring Configuration");
     }
 
     @Configuration
@@ -126,6 +138,18 @@ public class EventProcessorConfigurationTest {
             public void handle(String event) {
                 countDownLatch2.countDown();
             }
+        }
+
+        @SuppressWarnings("unused")
+        @Component
+        @ProcessingGroup("non_default_token_claim_interval")
+        public static class NonDefaultTokenClaimIntervalHandler {
+
+            @EventHandler
+            public void handle(String event) {
+
+            }
+
         }
     }
 }

@@ -1,11 +1,11 @@
 /*
- * Copyright (c) 2010-2018. Axon Framework
+ * Copyright (c) 2010-2019. Axon Framework
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *    http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -24,7 +24,9 @@ import org.axonframework.eventhandling.TrackedEventData;
 import org.axonframework.eventhandling.TrackedEventMessage;
 import org.axonframework.eventhandling.TrackingEventStream;
 import org.axonframework.eventhandling.TrackingToken;
+import org.axonframework.serialization.SerializedType;
 import org.axonframework.serialization.Serializer;
+import org.axonframework.serialization.UnknownSerializedType;
 import org.axonframework.serialization.upcasting.event.EventUpcaster;
 import org.axonframework.serialization.upcasting.event.NoOpEventUpcaster;
 import org.slf4j.Logger;
@@ -52,11 +54,15 @@ import static org.axonframework.common.ObjectUtils.getOrDefault;
  * @author Allard Buijze
  */
 public class EventBuffer implements TrackingEventStream {
-    final Logger logger = LoggerFactory.getLogger(EventBuffer.class);
 
+    private static final Logger logger = LoggerFactory.getLogger(EventBuffer.class);
+
+    private static final int DEFAULT_POLLING_TIME_MILLIS = 500;
+
+    private final Serializer serializer;
     private final BlockingQueue<TrackedEventData<byte[]>> events;
-
     private final Iterator<TrackedEventMessage<?>> eventStream;
+    private final long pollingTimeMillis;
 
     private TrackedEventData<byte[]> peekData;
     private TrackedEventMessage<?> peekEvent;
@@ -65,21 +71,38 @@ public class EventBuffer implements TrackingEventStream {
     private volatile boolean closed;
     private Consumer<Integer> consumeListener = i -> {
     };
+    private volatile Consumer<SerializedType> blacklistListener;
 
     /**
      * Initializes an Event Buffer, passing messages through given {@code upcasterChain} and deserializing events using
      * given {@code serializer}.
      *
-     * @param upcasterChain The upcasterChain to translate serialized representations before deserializing
-     * @param serializer    The serializer capable of deserializing incoming messages
+     * @param upcasterChain the upcasterChain to translate serialized representations before deserializing
+     * @param serializer    the serializer capable of deserializing incoming messages
      */
     public EventBuffer(EventUpcaster upcasterChain, Serializer serializer) {
+        this(upcasterChain, serializer, DEFAULT_POLLING_TIME_MILLIS);
+    }
+
+    /**
+     * Initializes an Event Buffer, passing messages through given {@code upcasterChain} and deserializing events using
+     * given {@code serializer}.
+     *
+     * @param upcasterChain     the upcasterChain to translate serialized representations before deserializing
+     * @param serializer        the serializer capable of deserializing incoming messages
+     * @param pollingTimeMillis a {@code long} defining the polling periods used to split the up the timeout used in
+     *                          {@link #hasNextAvailable(int, TimeUnit)}, ensuring nobody accidentally blocks for an
+     *                          extended period of time. Defaults to 500 milliseconds
+     */
+    public EventBuffer(EventUpcaster upcasterChain, Serializer serializer, long pollingTimeMillis) {
+        this.serializer = serializer;
         this.events = new LinkedBlockingQueue<>();
-        eventStream = EventUtils.upcastAndDeserializeTrackedEvents(StreamSupport.stream(new SimpleSpliterator<>(this::poll), false),
-                                                                   new GrpcMetaDataAwareSerializer(serializer),
-                                                                   getOrDefault(upcasterChain, NoOpEventUpcaster.INSTANCE)
-        )
-                                .iterator();
+        this.eventStream = EventUtils.upcastAndDeserializeTrackedEvents(
+                StreamSupport.stream(new SimpleSpliterator<>(this::poll), false),
+                new GrpcMetaDataAwareSerializer(serializer),
+                getOrDefault(upcasterChain, NoOpEventUpcaster.INSTANCE)
+        ).iterator();
+        this.pollingTimeMillis = pollingTimeMillis;
     }
 
     private TrackedEventData<byte[]> poll() {
@@ -99,10 +122,30 @@ public class EventBuffer implements TrackingEventStream {
     private void waitForData(long deadline) throws InterruptedException {
         long now = System.currentTimeMillis();
         if (peekData == null && now < deadline) {
-            peekData = events.poll(deadline - now, TimeUnit.MILLISECONDS);
+            peekData = events.poll(Math.min(deadline - now, pollingTimeMillis), TimeUnit.MILLISECONDS);
             if (peekData != null) {
                 consumeListener.accept(1);
             }
+        }
+    }
+
+    /**
+     * {@inheritDoc}
+     * ----
+     * <p>
+     * This implementation blacklists based on the payload type of the given message.
+     */
+    @Override
+    public void blacklist(TrackedEventMessage<?> trackedEventMessage) {
+        Consumer<SerializedType> bl = blacklistListener;
+        if (bl == null) {
+            return;
+        }
+        if (UnknownSerializedType.class.equals(trackedEventMessage.getPayloadType())) {
+            UnknownSerializedType unknownSerializedType = (UnknownSerializedType) trackedEventMessage.getPayload();
+            bl.accept(unknownSerializedType.serializedType());
+        } else {
+            bl.accept(serializer.typeForClass(trackedEventMessage.getPayloadType()));
         }
     }
 
@@ -116,12 +159,23 @@ public class EventBuffer implements TrackingEventStream {
     }
 
     /**
-     * Registers the callback to invoke when a raw input message was consumed from the buffer.
+     * Registers the callback to invoke when a raw input message was consumed from the buffer. Note that there can only
+     * be one listener registered.
      *
      * @param consumeListener the callback to invoke when a raw input message was consumed from the buffer
      */
     public void registerConsumeListener(Consumer<Integer> consumeListener) {
         this.consumeListener = consumeListener;
+    }
+
+    /**
+     * Registers the callback to invoke when a the event processor determines that a type should be blacklisted.
+     * Note that there can only be one listener registered.
+     *
+     * @param blacklistListener the callback to invoke when a payload type is to be blacklisted.
+     */
+    public void registerBlacklistListener(Consumer<SerializedType> blacklistListener) {
+        this.blacklistListener = blacklistListener;
     }
 
     @Override
@@ -169,12 +223,22 @@ public class EventBuffer implements TrackingEventStream {
     @Override
     public void close() {
         closed = true;
-        if (closeCallback != null) closeCallback.accept(this);
+        if (closeCallback != null) {
+            closeCallback.accept(this);
+        }
         events.clear();
     }
 
+    /**
+     * Push a new {@code event} on to this EventBuffer instance. Will return {@code false} if the given {@code event}
+     * could not be added because the buffer is already closed or if the operation was interrupted. If pushing the
+     * {@code event} was successful, {@code true} will be returned.
+     *
+     * @param event the {@link EventWithToken} to be pushed on to this EventBuffer
+     * @return {@code true} if adding the {@code event} to the buffer was successful and {@link false} if it wasn't
+     */
     public boolean push(EventWithToken event) {
-        if( closed) {
+        if (closed) {
             logger.debug("Received event while closed: {}", event.getToken());
             return false;
         }
@@ -189,6 +253,11 @@ public class EventBuffer implements TrackingEventStream {
         return true;
     }
 
+    /**
+     * Fail {@code this} EventBuffer with the given {@link RuntimeException}.
+     *
+     * @param e a {@link RuntimeException} with which {@code this} EventBuffer failed
+     */
     public void fail(RuntimeException e) {
         this.exception = e;
     }

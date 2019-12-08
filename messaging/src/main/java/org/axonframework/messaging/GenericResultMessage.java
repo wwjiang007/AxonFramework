@@ -1,11 +1,11 @@
 /*
- * Copyright (c) 2010-2018. Axon Framework
+ * Copyright (c) 2010-2019. Axon Framework
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *    http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -15,6 +15,9 @@
  */
 
 package org.axonframework.messaging;
+
+import org.axonframework.serialization.SerializedObject;
+import org.axonframework.serialization.Serializer;
 
 import java.util.Map;
 import java.util.Optional;
@@ -30,39 +33,6 @@ public class GenericResultMessage<R> extends MessageDecorator<R> implements Resu
     private static final long serialVersionUID = -9086395619674962782L;
 
     private final Throwable exception;
-
-    /**
-     * Returns the given {@code result} as a {@link ResultMessage} instance. If {@code result} already implements {@link
-     * ResultMessage}, it is returned as-is. If {@code result} implements {@link Message}, payload and meta data will be
-     * used to construct new {@link GenericResultMessage}. Otherwise, the given {@code result} is wrapped into a {@link
-     * GenericResultMessage} as its payload.
-     *
-     * @param result the command result to be wrapped as {@link ResultMessage}
-     * @param <T>    The type of the payload contained in returned Message
-     * @return a Message containing given {@code result} as payload, or {@code result} if already
-     * implements {@link ResultMessage}
-     */
-    @SuppressWarnings("unchecked")
-    public static <T> ResultMessage<T> asResultMessage(Object result) {
-        if (ResultMessage.class.isInstance(result)) {
-            return (ResultMessage<T>) result;
-        } else if (Message.class.isInstance(result)) {
-            Message<?> resultMessage = (Message<?>) result;
-            return new GenericResultMessage<>((T) resultMessage.getPayload(), resultMessage.getMetaData());
-        }
-        return new GenericResultMessage<>((T) result);
-    }
-
-    /**
-     * Creates a ResultMessage with the given {@code exception} result.
-     *
-     * @param exception the Exception describing the cause of an error
-     * @param <T>       the type of payload
-     * @return a message containing exception result
-     */
-    public static <T> ResultMessage<T> asResultMessage(Throwable exception) {
-        return new GenericResultMessage<>(exception);
-    }
 
     /**
      * Creates a ResultMessage with the given {@code result} as the payload.
@@ -108,7 +78,7 @@ public class GenericResultMessage<R> extends MessageDecorator<R> implements Resu
      * @param delegate the message delegate
      */
     public GenericResultMessage(Message<R> delegate) {
-        this(delegate, null);
+        this(delegate, GenericResultMessage.findExceptionResult(delegate));
     }
 
     /**
@@ -122,6 +92,46 @@ public class GenericResultMessage<R> extends MessageDecorator<R> implements Resu
         this.exception = exception;
     }
 
+    /**
+     * Returns the given {@code result} as a {@link ResultMessage} instance. If {@code result} already implements {@link
+     * ResultMessage}, it is returned as-is. If {@code result} implements {@link Message}, payload and meta data will be
+     * used to construct new {@link GenericResultMessage}. Otherwise, the given {@code result} is wrapped into a {@link
+     * GenericResultMessage} as its payload.
+     *
+     * @param result the command result to be wrapped as {@link ResultMessage}
+     * @param <T>    The type of the payload contained in returned Message
+     * @return a Message containing given {@code result} as payload, or {@code result} if already
+     * implements {@link ResultMessage}
+     */
+    @SuppressWarnings("unchecked")
+    public static <T> ResultMessage<T> asResultMessage(Object result) {
+        if (result instanceof ResultMessage) {
+            return (ResultMessage<T>) result;
+        } else if (result instanceof Message) {
+            Message<?> resultMessage = (Message<?>) result;
+            return (ResultMessage<T>) new GenericResultMessage<>(resultMessage);
+        }
+        return new GenericResultMessage<>((T) result);
+    }
+
+    /**
+     * Creates a ResultMessage with the given {@code exception} result.
+     *
+     * @param exception the Exception describing the cause of an error
+     * @param <T>       the type of payload
+     * @return a message containing exception result
+     */
+    public static <T> ResultMessage<T> asResultMessage(Throwable exception) {
+        return new GenericResultMessage<>(exception);
+    }
+
+    private static <R> Throwable findExceptionResult(Message<R> delegate) {
+        if (delegate instanceof ResultMessage && ((ResultMessage<R>) delegate).isExceptional()) {
+            return ((ResultMessage<R>) delegate).exceptionResult();
+        }
+        return null;
+    }
+
     @Override
     public boolean isExceptional() {
         return exception != null;
@@ -130,6 +140,14 @@ public class GenericResultMessage<R> extends MessageDecorator<R> implements Resu
     @Override
     public Optional<Throwable> optionalExceptionResult() {
         return Optional.ofNullable(exception);
+    }
+
+    @Override
+    public <S> SerializedObject<S> serializePayload(Serializer serializer, Class<S> expectedRepresentation) {
+        if (isExceptional()) {
+            return serializer.serialize(exceptionDetails().orElse(null), expectedRepresentation);
+        }
+        return super.serializePayload(serializer, expectedRepresentation);
     }
 
     @Override
@@ -163,6 +181,7 @@ public class GenericResultMessage<R> extends MessageDecorator<R> implements Resu
         return "GenericResultMessage";
     }
 
+    @SuppressWarnings("unchecked")
     @Override
     public R getPayload() {
         if (isExceptional()) {

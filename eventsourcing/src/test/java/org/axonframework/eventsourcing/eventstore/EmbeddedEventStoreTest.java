@@ -16,7 +16,6 @@
 
 package org.axonframework.eventsourcing.eventstore;
 
-import org.axonframework.eventsourcing.utils.MockException;
 import org.axonframework.common.AxonThreadFactory;
 import org.axonframework.eventhandling.DomainEventMessage;
 import org.axonframework.eventhandling.EventMessage;
@@ -26,10 +25,11 @@ import org.axonframework.eventhandling.TrackedEventMessage;
 import org.axonframework.eventhandling.TrackingEventStream;
 import org.axonframework.eventhandling.TrackingToken;
 import org.axonframework.eventsourcing.eventstore.inmemory.InMemoryEventStorageEngine;
+import org.axonframework.eventsourcing.utils.MockException;
 import org.axonframework.messaging.Message;
 import org.axonframework.messaging.unitofwork.CurrentUnitOfWork;
 import org.axonframework.messaging.unitofwork.DefaultUnitOfWork;
-import org.junit.*;
+import org.junit.jupiter.api.*;
 import org.mockito.invocation.*;
 import org.mockito.stubbing.*;
 
@@ -43,33 +43,35 @@ import java.util.stream.Stream;
 
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
 import static java.util.stream.Collectors.toList;
-import static junit.framework.TestCase.assertFalse;
-import static junit.framework.TestCase.fail;
 import static org.axonframework.eventsourcing.utils.EventStoreTestUtils.*;
-import static org.junit.Assert.*;
+import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
 
 /**
  * @author Rene de Waele
  */
-public class EmbeddedEventStoreTest {
+class EmbeddedEventStoreTest {
 
     private static final int CACHED_EVENTS = 10;
     private static final long FETCH_DELAY = 1000;
     private static final long CLEANUP_DELAY = 10000;
+    private static final boolean OPTIMIZE_EVENT_CONSUMPTION = true;
 
     private EmbeddedEventStore testSubject;
     private EventStorageEngine storageEngine;
     private ThreadFactory threadFactory;
 
-    @Before
-    public void setUp() {
+    @BeforeEach
+    void setUp() {
         storageEngine = spy(new InMemoryEventStorageEngine());
         threadFactory = spy(new AxonThreadFactory(EmbeddedEventStore.class.getSimpleName()));
-        newTestSubject(CACHED_EVENTS, FETCH_DELAY, CLEANUP_DELAY);
+        newTestSubject(CACHED_EVENTS, FETCH_DELAY, CLEANUP_DELAY, OPTIMIZE_EVENT_CONSUMPTION);
     }
 
-    private void newTestSubject(int cachedEvents, long fetchDelay, long cleanupDelay) {
+    private void newTestSubject(int cachedEvents,
+                                long fetchDelay,
+                                long cleanupDelay,
+                                boolean optimizeEventConsumption) {
         Optional.ofNullable(testSubject).ifPresent(EmbeddedEventStore::shutDown);
         testSubject = EmbeddedEventStore.builder()
                                         .storageEngine(storageEngine)
@@ -77,16 +79,17 @@ public class EmbeddedEventStoreTest {
                                         .fetchDelay(fetchDelay)
                                         .cleanupDelay(cleanupDelay)
                                         .threadFactory(threadFactory)
+                                        .optimizeEventConsumption(optimizeEventConsumption)
                                         .build();
     }
 
-    @After
-    public void tearDown() {
+    @AfterEach
+    void tearDown() {
         testSubject.shutDown();
     }
 
     @Test
-    public void testExistingEventIsPassedToReader() throws Exception {
+    void testExistingEventIsPassedToReader() throws Exception {
         DomainEventMessage<?> expected = createEvent();
         testSubject.publish(expected);
         TrackingEventStream stream = testSubject.openStream(null);
@@ -98,8 +101,9 @@ public class EmbeddedEventStoreTest {
         assertEquals(expected.getAggregateIdentifier(), ((DomainEventMessage<?>) actual).getAggregateIdentifier());
     }
 
-    @Test(timeout = FETCH_DELAY / 10)
-    public void testEventPublishedAfterOpeningStreamIsPassedToReaderImmediately() throws Exception {
+    @Test
+    @Timeout(value = FETCH_DELAY / 10, unit = MILLISECONDS)
+    void testEventPublishedAfterOpeningStreamIsPassedToReaderImmediately() throws Exception {
         TrackingEventStream stream = testSubject.openStream(null);
         assertFalse(stream.hasNextAvailable());
         DomainEventMessage<?> expected = createEvent();
@@ -115,8 +119,9 @@ public class EmbeddedEventStoreTest {
         t.join();
     }
 
-    @Test(timeout = 5000)
-    public void testReadingIsBlockedWhenStoreIsEmpty() throws Exception {
+    @Test
+    @Timeout(value = 5)
+    void testReadingIsBlockedWhenStoreIsEmpty() throws Exception {
         CountDownLatch lock = new CountDownLatch(1);
         TrackingEventStream stream = testSubject.openStream(null);
         Thread t = new Thread(() -> stream.asStream().findFirst().ifPresent(event -> lock.countDown()));
@@ -127,8 +132,9 @@ public class EmbeddedEventStoreTest {
         assertEquals(0, lock.getCount());
     }
 
-    @Test(timeout = 5000)
-    public void testReadingIsBlockedWhenEndOfStreamIsReached() throws Exception {
+    @Test
+    @Timeout(value = 5)
+    void testReadingIsBlockedWhenEndOfStreamIsReached() throws Exception {
         testSubject.publish(createEvent());
         CountDownLatch lock = new CountDownLatch(2);
         TrackingEventStream stream = testSubject.openStream(null);
@@ -141,8 +147,9 @@ public class EmbeddedEventStoreTest {
         assertEquals(0, lock.getCount());
     }
 
-    @Test(timeout = 5000)
-    public void testReadingCanBeContinuedUsingLastToken() throws Exception {
+    @Test
+    @Timeout(value = 5)
+    void testReadingCanBeContinuedUsingLastToken() throws Exception {
         List<? extends EventMessage<?>> events = createEvents(2);
         testSubject.publish(events);
         TrackedEventMessage<?> first = testSubject.openStream(null).nextAvailable();
@@ -152,8 +159,9 @@ public class EmbeddedEventStoreTest {
         assertEquals(events.get(1).getIdentifier(), second.getIdentifier());
     }
 
-    @Test(timeout = 5000)
-    public void testEventIsFetchedFromCacheWhenFetchedASecondTime() throws Exception {
+    @Test
+    @Timeout(value = 5)
+    void testEventIsFetchedFromCacheWhenFetchedASecondTime() throws Exception {
         CountDownLatch lock = new CountDownLatch(2);
         List<TrackedEventMessage<?>> events = new CopyOnWriteArrayList<>();
         Thread t = new Thread(() -> testSubject.openStream(null).asStream().limit(2).forEach(event -> {
@@ -169,9 +177,10 @@ public class EmbeddedEventStoreTest {
         assertSame(events.get(1), second);
     }
 
-    @Test(timeout = 5000)
-    public void testPeriodicPollingWhenEventStorageIsUpdatedIndependently() throws Exception {
-        newTestSubject(CACHED_EVENTS, 20, CLEANUP_DELAY);
+    @Test
+    @Timeout(value = 5)
+    void testPeriodicPollingWhenEventStorageIsUpdatedIndependently() throws Exception {
+        newTestSubject(CACHED_EVENTS, 20, CLEANUP_DELAY, OPTIMIZE_EVENT_CONSUMPTION);
         TrackingEventStream stream = testSubject.openStream(null);
         CountDownLatch lock = new CountDownLatch(1);
         Thread t = new Thread(() -> stream.asStream().findFirst().ifPresent(event -> lock.countDown()));
@@ -182,9 +191,10 @@ public class EmbeddedEventStoreTest {
         assertTrue(lock.await(100, MILLISECONDS));
     }
 
-    @Test(timeout = 5000)
-    public void testConsumerStopsTailingWhenItFallsBehindTheCache() throws Exception {
-        newTestSubject(CACHED_EVENTS, FETCH_DELAY, 20);
+    @Test
+    @Timeout(value = 5)
+    void testConsumerStopsTailingWhenItFallsBehindTheCache() throws Exception {
+        newTestSubject(CACHED_EVENTS, FETCH_DELAY, 20, OPTIMIZE_EVENT_CONSUMPTION);
         TrackingEventStream stream = testSubject.openStream(null);
         assertFalse(stream.hasNextAvailable()); //now we should be tailing
         testSubject.publish(createEvents(CACHED_EVENTS)); //triggers event producer to open a stream
@@ -201,7 +211,7 @@ public class EmbeddedEventStoreTest {
     }
 
     @Test
-    public void testLoadWithoutSnapshot() {
+    void testLoadWithoutSnapshot() {
         testSubject.publish(createEvents(110));
         List<DomainEventMessage<?>> eventMessages = testSubject.readEvents(AGGREGATE).asStream().collect(toList());
         assertEquals(110, eventMessages.size());
@@ -209,7 +219,7 @@ public class EmbeddedEventStoreTest {
     }
 
     @Test
-    public void testLoadWithSnapshot() {
+    void testLoadWithSnapshot() {
         testSubject.publish(createEvents(110));
         storageEngine.storeSnapshot(createEvent(30));
         List<DomainEventMessage<?>> eventMessages = testSubject.readEvents(AGGREGATE).asStream().collect(toList());
@@ -220,8 +230,8 @@ public class EmbeddedEventStoreTest {
 
     /* Reproduces issue reported in https://github.com/AxonFramework/AxonFramework/issues/485 */
     @Test
-    public void testStreamEventsShouldNotReturnDuplicateTokens() throws InterruptedException {
-        newTestSubject(0, 1000, 1000);
+    void testStreamEventsShouldNotReturnDuplicateTokens() throws InterruptedException {
+        newTestSubject(0, 1000, 1000, OPTIMIZE_EVENT_CONSUMPTION);
         Stream mockStream = mock(Stream.class);
         Iterator mockIterator = mock(Iterator.class);
         when(mockStream.iterator()).thenReturn(mockIterator);
@@ -241,7 +251,7 @@ public class EmbeddedEventStoreTest {
     }
 
     @Test
-    public void testLoadWithFailingSnapshot() {
+    void testLoadWithFailingSnapshot() {
         testSubject.publish(createEvents(110));
         storageEngine.storeSnapshot(createEvent(30));
         when(storageEngine.readSnapshot(AGGREGATE)).thenThrow(new MockException());
@@ -252,33 +262,33 @@ public class EmbeddedEventStoreTest {
     }
 
     @Test
-    public void testLoadEventsAfterPublishingInSameUnitOfWork() {
+    void testLoadEventsAfterPublishingInSameUnitOfWork() {
         List<DomainEventMessage<?>> events = createEvents(10);
         testSubject.publish(events.subList(0, 2));
         DefaultUnitOfWork.startAndGet(null)
                          .execute(() -> {
-                             Assert.assertEquals(2, testSubject.readEvents(AGGREGATE).asStream().count());
+                             assertEquals(2, testSubject.readEvents(AGGREGATE).asStream().count());
 
                              testSubject.publish(events.subList(2, events.size()));
-                             Assert.assertEquals(10, testSubject.readEvents(AGGREGATE).asStream().count());
+                             assertEquals(10, testSubject.readEvents(AGGREGATE).asStream().count());
                          });
     }
 
     @Test
-    public void testLoadEventsWithOffsetAfterPublishingInSameUnitOfWork() {
+    void testLoadEventsWithOffsetAfterPublishingInSameUnitOfWork() {
         List<DomainEventMessage<?>> events = createEvents(10);
         testSubject.publish(events.subList(0, 2));
         DefaultUnitOfWork.startAndGet(null)
                          .execute(() -> {
-                             Assert.assertEquals(2, testSubject.readEvents(AGGREGATE).asStream().count());
+                             assertEquals(2, testSubject.readEvents(AGGREGATE).asStream().count());
 
                              testSubject.publish(events.subList(2, events.size()));
-                             Assert.assertEquals(8, testSubject.readEvents(AGGREGATE, 2).asStream().count());
+                             assertEquals(8, testSubject.readEvents(AGGREGATE, 2).asStream().count());
                          });
     }
 
     @Test
-    public void testEventsAppendedInvisibleUntilUnitOfWorkIsCommitted() {
+    void testEventsAppendedInvisibleUntilUnitOfWorkIsCommitted() {
         List<DomainEventMessage<?>> events = createEvents(10);
         testSubject.publish(events.subList(0, 2));
         DefaultUnitOfWork<Message<?>> unitOfWork = DefaultUnitOfWork.startAndGet(null);
@@ -286,18 +296,19 @@ public class EmbeddedEventStoreTest {
 
         CurrentUnitOfWork.clear(unitOfWork);
         // working outside the context of the UoW now
-        Assert.assertEquals(2, testSubject.readEvents(AGGREGATE).asStream().count());
+        assertEquals(2, testSubject.readEvents(AGGREGATE).asStream().count());
 
         CurrentUnitOfWork.set(unitOfWork);
         // Back in the context
-        Assert.assertEquals(10, testSubject.readEvents(AGGREGATE).asStream().count());
+        assertEquals(10, testSubject.readEvents(AGGREGATE).asStream().count());
         unitOfWork.rollback();
 
-        Assert.assertEquals(2, testSubject.readEvents(AGGREGATE).asStream().count());
+        assertEquals(2, testSubject.readEvents(AGGREGATE).asStream().count());
     }
 
-    @Test(timeout = 5000)
-    public void testCustomThreadFactoryIsUsed() throws Exception {
+    @Test
+    @Timeout(value = 5)
+    void testCustomThreadFactoryIsUsed() throws Exception {
         CountDownLatch lock = new CountDownLatch(1);
         TrackingEventStream stream = testSubject.openStream(null);
         Thread t = new Thread(() -> stream.asStream().findFirst().ifPresent(event -> lock.countDown()));
@@ -308,6 +319,67 @@ public class EmbeddedEventStoreTest {
         assertEquals(0, lock.getCount());
 
         verify(threadFactory, atLeastOnce()).newThread(any(Runnable.class));
+    }
+
+    @Test
+    void testOpenStreamReadsEventsFromAnEventProducedByVerifyThreadFactoryOperation()
+            throws InterruptedException {
+        TrackingEventStream eventStream = testSubject.openStream(null);
+
+        assertFalse(eventStream.hasNextAvailable()); // There are no events published yet, so stream will tail
+        testSubject.publish(createEvents(5));// Publish some events which should be returned to the stream by a producer
+
+        Thread.sleep(100); // Give the Event Producer thread time to fill the cache
+        assertTrue(eventStream.hasNextAvailable()); // Stream should contain events again, from the producer
+
+        // Consume events until the end
+        while (eventStream.hasNextAvailable()) {
+            eventStream.nextAvailable();
+        }
+
+        assertFalse(eventStream.hasNextAvailable()); // Should have reached the end, hence returned false
+
+        verify(threadFactory, atLeastOnce()).newThread(any(Runnable.class)); // Verify a producer thread was created
+    }
+
+    @Test
+    void testTailingConsumptionThreadIsNeverCreatedIfEventConsumptionOptimizationIsSwitchedOff()
+            throws InterruptedException {
+        boolean doNotOptimizeEventConsumption = false;
+        //noinspection ConstantConditions
+        newTestSubject(CACHED_EVENTS, FETCH_DELAY, CLEANUP_DELAY, doNotOptimizeEventConsumption);
+
+        TrackingEventStream eventStream = testSubject.openStream(null);
+        testSubject.publish(createEvents(5));
+
+        // Consume some events
+        while (eventStream.hasNextAvailable()) {
+            eventStream.nextAvailable();
+        }
+
+        // No tailing-consumer Producer thread has ever been created
+        verifyZeroInteractions(threadFactory);
+    }
+
+    @Test
+    void testEventStreamKeepsReturningEventsIfEventConsumptionOptimizationIsSwitchedOff()
+            throws InterruptedException {
+        boolean doNotOptimizeEventConsumption = false;
+        //noinspection ConstantConditions
+        newTestSubject(CACHED_EVENTS, FETCH_DELAY, CLEANUP_DELAY, doNotOptimizeEventConsumption);
+
+        TrackingEventStream eventStream = testSubject.openStream(null);
+
+        assertFalse(eventStream.hasNextAvailable()); // There are no events published yet, so should be false
+
+        testSubject.publish(createEvents(5)); // Publish some events which should be returned to the stream
+
+        assertTrue(eventStream.hasNextAvailable()); // There are new events, so should be true
+        // Consume until the end
+        while (eventStream.hasNextAvailable()) {
+            eventStream.nextAvailable();
+        }
+        assertFalse(eventStream.hasNextAvailable()); // Should have no events anymore
     }
 
     private static class SynchronizedBooleanAnswer implements Answer<Boolean> {

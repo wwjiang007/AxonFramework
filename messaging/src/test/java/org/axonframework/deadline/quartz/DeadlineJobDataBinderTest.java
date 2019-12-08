@@ -1,11 +1,11 @@
 /*
- * Copyright (c) 2010-2018. Axon Framework
+ * Copyright (c) 2010-2019. Axon Framework
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *    http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -28,11 +28,13 @@ import org.axonframework.serialization.Serializer;
 import org.axonframework.serialization.SimpleSerializedObject;
 import org.axonframework.serialization.json.JacksonSerializer;
 import org.axonframework.serialization.xml.XStreamSerializer;
-import org.junit.*;
-import org.junit.runner.*;
-import org.junit.runners.*;
+import org.junit.Test;
+import org.junit.runner.RunWith;
+import org.junit.runners.Parameterized;
 import org.quartz.JobDataMap;
 
+import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.Objects;
@@ -68,7 +70,7 @@ public class DeadlineJobDataBinderTest {
         this.revisionMatcher = revisionMatcher;
 
         DeadlineMessage<String> testDeadlineMessage =
-                GenericDeadlineMessage.asDeadlineMessage(TEST_DEADLINE_NAME, TEST_DEADLINE_PAYLOAD);
+                GenericDeadlineMessage.asDeadlineMessage(TEST_DEADLINE_NAME, TEST_DEADLINE_PAYLOAD, Instant.now());
         testMetaData = MetaData.with("some-key", "some-value");
         this.testDeadlineMessage = testDeadlineMessage.withMetaData(testMetaData);
         testDeadlineScope = new TestScopeDescriptor("aggregate-type", "aggregate-identifier");
@@ -128,7 +130,7 @@ public class DeadlineJobDataBinderTest {
 
         assertEquals(testDeadlineMessage.getDeadlineName(), result.getDeadlineName());
         assertEquals(testDeadlineMessage.getIdentifier(), result.getIdentifier());
-        assertEquals(testDeadlineMessage.getTimestamp(), result.getTimestamp());
+        assertEquals(testDeadlineMessage.getTimestamp().truncatedTo(ChronoUnit.MILLIS), result.getTimestamp());
         assertEquals(testDeadlineMessage.getPayload(), result.getPayload());
         assertEquals(testDeadlineMessage.getPayloadType(), result.getPayloadType());
         assertEquals(testDeadlineMessage.getMetaData(), result.getMetaData());

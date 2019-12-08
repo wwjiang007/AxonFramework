@@ -1,11 +1,11 @@
 /*
- * Copyright (c) 2010-2018. Axon Framework
+ * Copyright (c) 2010-2019. Axon Framework
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *    http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -21,24 +21,9 @@ import com.lmax.disruptor.RingBuffer;
 import com.lmax.disruptor.WaitStrategy;
 import com.lmax.disruptor.dsl.Disruptor;
 import com.lmax.disruptor.dsl.ProducerType;
-import org.axonframework.modelling.command.AnnotationCommandTargetResolver;
-import org.axonframework.commandhandling.CommandBus;
-import org.axonframework.commandhandling.CommandCallback;
-import org.axonframework.commandhandling.CommandMessage;
-import org.axonframework.commandhandling.CommandResultMessage;
-import org.axonframework.modelling.command.CommandTargetResolver;
-import org.axonframework.commandhandling.MonitorAwareCallback;
-import org.axonframework.commandhandling.NoHandlerForCommandException;
-import org.axonframework.modelling.command.Aggregate;
-import org.axonframework.modelling.command.AggregateNotFoundException;
-import org.axonframework.modelling.command.AggregateScopeDescriptor;
-import org.axonframework.modelling.command.Repository;
-import org.axonframework.modelling.command.RepositoryProvider;
-import org.axonframework.common.Assert;
-import org.axonframework.common.AxonConfigurationException;
-import org.axonframework.common.AxonThreadFactory;
-import org.axonframework.common.IdentifierFactory;
-import org.axonframework.common.Registration;
+import org.axonframework.commandhandling.*;
+import org.axonframework.commandhandling.callbacks.NoOpCallback;
+import org.axonframework.common.*;
 import org.axonframework.common.caching.Cache;
 import org.axonframework.common.caching.NoCache;
 import org.axonframework.common.transaction.TransactionManager;
@@ -46,11 +31,7 @@ import org.axonframework.eventsourcing.AggregateFactory;
 import org.axonframework.eventsourcing.NoSnapshotTriggerDefinition;
 import org.axonframework.eventsourcing.SnapshotTriggerDefinition;
 import org.axonframework.eventsourcing.eventstore.EventStore;
-import org.axonframework.messaging.Message;
-import org.axonframework.messaging.MessageDispatchInterceptor;
-import org.axonframework.messaging.MessageHandler;
-import org.axonframework.messaging.MessageHandlerInterceptor;
-import org.axonframework.messaging.ScopeDescriptor;
+import org.axonframework.messaging.*;
 import org.axonframework.messaging.annotation.ClasspathHandlerDefinition;
 import org.axonframework.messaging.annotation.ClasspathParameterResolverFactory;
 import org.axonframework.messaging.annotation.HandlerDefinition;
@@ -58,28 +39,24 @@ import org.axonframework.messaging.annotation.ParameterResolverFactory;
 import org.axonframework.messaging.unitofwork.RollbackConfiguration;
 import org.axonframework.messaging.unitofwork.RollbackConfigurationType;
 import org.axonframework.messaging.unitofwork.UnitOfWork;
+import org.axonframework.modelling.command.*;
 import org.axonframework.monitoring.MessageMonitor;
 import org.axonframework.monitoring.NoOpMessageMonitor;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Objects;
-import java.util.concurrent.Callable;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentMap;
-import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ExecutionException;
-import java.util.concurrent.Executor;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
+import java.util.concurrent.*;
 
 import static java.lang.String.format;
 import static org.axonframework.commandhandling.GenericCommandResultMessage.asCommandResultMessage;
 import static org.axonframework.common.BuilderUtils.assertNonNull;
 import static org.axonframework.common.BuilderUtils.assertThat;
+import static org.axonframework.common.ObjectUtils.getOrDefault;
 
 /**
  * Asynchronous CommandBus implementation with very high performance characteristics. It divides the command handling
@@ -154,9 +131,46 @@ public class DisruptorCommandBus implements CommandBus {
     private final MessageMonitor<? super CommandMessage<?>> messageMonitor;
     private final Disruptor<CommandHandlingEntry> disruptor;
     private final CommandHandlerInvoker[] commandHandlerInvokers;
+    private final DuplicateCommandHandlerResolver duplicateCommandHandlerResolver;
+    private final CommandCallback<Object, Object> defaultCommandCallback;
 
     private volatile boolean started = true;
     private volatile boolean disruptorShutDown = false;
+
+    /**
+     * Instantiate a Builder to be able to create a {@link DisruptorCommandBus}.
+     * <p>
+     * The following configurable fields have defaults:
+     * <ul>
+     * <li>The {@code rescheduleCommandsOnCorruptState} defaults to {@code true}.</li>
+     * <li>The {@code coolingDownPeriod} defaults to {@code 1000}.</li>
+     * <li>The {@link CommandTargetResolver} defaults to an {@link AnnotationCommandTargetResolver}.</li>
+     * <li>The {@code publisherThreadCount} defaults to {@code 1}.</li>
+     * <li>The {@link MessageMonitor} defaults to {@link NoOpMessageMonitor#INSTANCE}.</li>
+     * <li>The {@link RollbackConfiguration} defaults to {@link RollbackConfigurationType#UNCHECKED_EXCEPTIONS}.</li>
+     * <li>The {@code bufferSize} defaults to {@code 4096}.</li>
+     * <li>The {@link ProducerType} defaults to {@link ProducerType#MULTI}.</li>
+     * <li>The {@link WaitStrategy} defaults to a {@link BlockingWaitStrategy}.</li>
+     * <li>The {@code invokerThreadCount} defaults to {@code 1}.</li>
+     * <li>The {@link Cache} defaults to {@link NoCache#INSTANCE}.</li>
+     * <li>The {@link DuplicateCommandHandlerResolver} defaults to {@link DuplicateCommandHandlerResolution#logAndOverride()}.</li>
+     * </ul>
+     * The (2) Threads required for command execution are created immediately. Additional threads are used to invoke
+     * response callbacks and to initialize a recovery process in the case of errors. The thread creation process can
+     * be specified by providing an {@link Executor}.
+     * <p>
+     * The {@link CommandTargetResolver}, {@link MessageMonitor}, {@link RollbackConfiguration}, {@link ProducerType},
+     * {@link WaitStrategy} and {@link Cache} are a <b>hard requirements</b>. Thus setting them to {@code null} will
+     * result in an {@link AxonConfigurationException}.
+     * Additionally, the {@code coolingDownPeriod}, {@code publisherThreadCount}, {@code bufferSize} and
+     * {@code invokerThreadCount} have a positive number constraint, thus will also result in an
+     * AxonConfigurationException if set otherwise.
+     *
+     * @return a Builder to be able to create a {@link DisruptorCommandBus}
+     */
+    public static Builder builder() {
+        return new Builder();
+    }
 
     /**
      * Instantiate a {@link DisruptorCommandBus} based on the fields contained in the {@link Builder}. The Threads
@@ -189,6 +203,7 @@ public class DisruptorCommandBus implements CommandBus {
         rescheduleOnCorruptState = builder.rescheduleCommandsOnCorruptState;
         coolingDownPeriod = builder.coolingDownPeriod;
         commandTargetResolver = builder.commandTargetResolver;
+        defaultCommandCallback = builder.defaultCommandCallback;
 
         // Configure publisher Threads
         EventPublisher[] publishers = initializePublisherThreads(builder.publisherThreadCount,
@@ -197,6 +212,7 @@ public class DisruptorCommandBus implements CommandBus {
                                                                  builder.rollbackConfiguration);
         publisherCount = publishers.length;
         messageMonitor = builder.messageMonitor;
+        duplicateCommandHandlerResolver = builder.duplicateCommandHandlerResolver;
 
         disruptor = new Disruptor<>(CommandHandlingEntry::new,
                                     builder.bufferSize,
@@ -216,58 +232,19 @@ public class DisruptorCommandBus implements CommandBus {
                                                         TransactionManager transactionManager,
                                                         RollbackConfiguration rollbackConfiguration) {
         EventPublisher[] publishers = new EventPublisher[publisherThreadCount];
-        for (int t = 0; t < publishers.length; t++) {
-            publishers[t] = new EventPublisher(executor, transactionManager, rollbackConfiguration, t);
-        }
+        Arrays.setAll(publishers, t -> new EventPublisher(executor, transactionManager, rollbackConfiguration, t));
         return publishers;
     }
 
     private CommandHandlerInvoker[] initializeInvokerThreads(int invokerThreadCount, Cache cache) {
-        CommandHandlerInvoker[] invokers;
-        invokers = new CommandHandlerInvoker[invokerThreadCount];
-        for (int t = 0; t < invokers.length; t++) {
-            invokers[t] = new CommandHandlerInvoker(cache, t);
-        }
+        CommandHandlerInvoker[] invokers = new CommandHandlerInvoker[invokerThreadCount];
+        Arrays.setAll(invokers, t -> new CommandHandlerInvoker(cache, t));
         return invokers;
-    }
-
-    /**
-     * Instantiate a Builder to be able to create a {@link DisruptorCommandBus}.
-     * <p>
-     * The following configurable fields have defaults:
-     * <ul>
-     * <li>The {@code rescheduleCommandsOnCorruptState} defaults to {@code true}.</li>
-     * <li>The {@code coolingDownPeriod} defaults to {@code 1000}.</li>
-     * <li>The {@link CommandTargetResolver} defaults to an {@link AnnotationCommandTargetResolver}.</li>
-     * <li>The {@code publisherThreadCount} defaults to {@code 1}.</li>
-     * <li>The {@link MessageMonitor} defaults to {@link NoOpMessageMonitor#INSTANCE}.</li>
-     * <li>The {@link RollbackConfiguration} defaults to {@link RollbackConfigurationType#UNCHECKED_EXCEPTIONS}.</li>
-     * <li>The {@code bufferSize} defaults to {@code 4096}.</li>
-     * <li>The {@link ProducerType} defaults to {@link ProducerType#MULTI}.</li>
-     * <li>The {@link WaitStrategy} defaults to a {@link BlockingWaitStrategy}.</li>
-     * <li>The {@code invokerThreadCount} defaults to {@code 1}.</li>
-     * <li>The {@link Cache} defaults to {@link NoCache#INSTANCE}.</li>
-     * </ul>
-     * The (2) Threads required for command execution are created immediately. Additional threads are used to invoke
-     * response callbacks and to initialize a recovery process in the case of errors. The thread creation process can be
-     * specified by providing an {@link Executor}.
-     * <p>
-     * The {@link CommandTargetResolver}, {@link MessageMonitor}, {@link RollbackConfiguration}, {@link ProducerType},
-     * {@link WaitStrategy} and {@link Cache} are a <b>hard requirements</b>. Thus setting them to {@code null} will
-     * result in an {@link AxonConfigurationException}.
-     * Additionally, the {@code coolingDownPeriod}, {@code publisherThreadCount}, {@code bufferSize} and
-     * {@code invokerThreadCount} have a positive number constraint, thus will also result in an
-     * AxonConfigurationException if set otherwise.
-     *
-     * @return a Builder to be able to create a {@link DisruptorCommandBus}
-     */
-    public static Builder builder() {
-        return new Builder();
     }
 
     @Override
     public <C> void dispatch(CommandMessage<C> command) {
-        dispatch(command, FailureLoggingCommandCallback.INSTANCE);
+        dispatch(command, defaultCommandCallback);
     }
 
     @Override
@@ -520,7 +497,13 @@ public class DisruptorCommandBus implements CommandBus {
 
     @Override
     public Registration subscribe(String commandName, MessageHandler<? super CommandMessage<?>> handler) {
-        commandHandlers.put(commandName, handler);
+        commandHandlers.compute(commandName, (cn, existingHandler) -> {
+            if (existingHandler == null || existingHandler == handler) {
+                return handler;
+            } else {
+                return duplicateCommandHandlerResolver.resolve(cn, existingHandler, handler);
+            }
+        });
         return () -> commandHandlers.remove(commandName, handler);
     }
 
@@ -580,136 +563,6 @@ public class DisruptorCommandBus implements CommandBus {
         }
     }
 
-    private class DisruptorRepository<T> implements Repository<T> {
-
-        private final Class<T> type;
-
-        public DisruptorRepository(Class<T> type) {
-            this.type = type;
-        }
-
-        @SuppressWarnings("unchecked")
-        @Override
-        public Aggregate<T> load(String aggregateIdentifier, Long expectedVersion) {
-            return (Aggregate<T>) CommandHandlerInvoker.getRepository(type).load(aggregateIdentifier, expectedVersion);
-        }
-
-        @SuppressWarnings("unchecked")
-        @Override
-        public Aggregate<T> load(String aggregateIdentifier) {
-            return (Aggregate<T>) CommandHandlerInvoker.getRepository(type).load(aggregateIdentifier);
-        }
-
-        @Override
-        public Aggregate<T> newInstance(Callable<T> factoryMethod) throws Exception {
-            return CommandHandlerInvoker.<T>getRepository(type).newInstance(factoryMethod);
-        }
-
-        @Override
-        public void send(Message<?> message, ScopeDescriptor scopeDescription) throws Exception {
-            CompletableFuture future = new CompletableFuture();
-            send(message, scopeDescription, future);
-            try {
-                future.get();
-            } catch (ExecutionException e) {
-                if (e.getCause() instanceof Exception) {
-                    throw (Exception) e.getCause();
-                }
-                throw e;
-            }
-        }
-
-        @SuppressWarnings("Duplicates")
-        private void send(Message<?> message, ScopeDescriptor scopeDescription, CompletableFuture<?> future) {
-            if (!canResolve(scopeDescription)) {
-                future.complete(null);
-                return;
-            }
-
-            String aggregateIdentifier = ((AggregateScopeDescriptor) scopeDescription).getIdentifier().toString();
-
-            RingBuffer<CommandHandlingEntry> ringBuffer = disruptor.getRingBuffer();
-            int invokerSegment = 0;
-            int publisherSegment = 0;
-            if (commandHandlerInvokers.length > 1 || publisherCount > 1) {
-                if (aggregateIdentifier != null) {
-                    int idHash = aggregateIdentifier.hashCode() & Integer.MAX_VALUE;
-                    if (commandHandlerInvokers.length > 1) {
-                        invokerSegment = idHash % commandHandlerInvokers.length;
-                    }
-                    if (publisherCount > 1) {
-                        publisherSegment = idHash % publisherCount;
-                    }
-                }
-            }
-
-            long sequence = ringBuffer.next();
-            try {
-                CommandHandlingEntry event = ringBuffer.get(sequence);
-                event.resetAsCallable(
-                        () -> {
-                            try {
-                                return load(aggregateIdentifier).handle(message);
-                            } catch (AggregateNotFoundException e) {
-                                logger.debug("Aggregate (with id: [{}]) cannot be loaded. "
-                                                     + "Hence, message '[{}]' cannot be handled.",
-                                             aggregateIdentifier, message);
-                            }
-                            return null;
-                        },
-                        invokerSegment,
-                        publisherSegment,
-                        new BlacklistDetectingCallback<>(
-                                new CommandCallback<Object, Object>() {
-                                    @Override
-                                    public void onResult(CommandMessage<?> commandMessage,
-                                                         CommandResultMessage<?> commandResultMessage) {
-                                        if (commandResultMessage.isExceptional()) {
-                                            logger.warn("Failed sending message [{}] to aggregate with id [{}]",
-                                                    message, aggregateIdentifier);
-                                            future.completeExceptionally(commandResultMessage.exceptionResult());
-                                        } else {
-                                            future.complete(null);
-                                        }
-                                    }
-                                },
-                                disruptor.getRingBuffer(),
-                                (commandMessage, callback) -> send(message, scopeDescription, future),
-                                rescheduleOnCorruptState
-                        )
-                );
-            } finally {
-                ringBuffer.publish(sequence);
-            }
-        }
-
-        @Override
-        public boolean canResolve(ScopeDescriptor scopeDescription) {
-            return scopeDescription instanceof AggregateScopeDescriptor
-                    && Objects.equals(type.getSimpleName(), ((AggregateScopeDescriptor) scopeDescription).getType());
-        }
-    }
-
-    private class ExceptionHandler implements com.lmax.disruptor.ExceptionHandler {
-
-        @Override
-        public void handleEventException(Throwable ex, long sequence, Object event) {
-            logger.error("Exception occurred while processing a {}.",
-                         ((CommandHandlingEntry) event).getMessage().getPayloadType().getSimpleName(), ex);
-        }
-
-        @Override
-        public void handleOnStartException(Throwable ex) {
-            logger.error("Failed to start the DisruptorCommandBus.", ex);
-            disruptor.shutdown();
-        }
-
-        @Override
-        public void handleOnShutdownException(Throwable ex) {
-            logger.error("Error while shutting down the DisruptorCommandBus", ex);
-        }
-    }
-
     /**
      * Builder class to instantiate a {@link DisruptorCommandBus}.
      * <p>
@@ -726,10 +579,11 @@ public class DisruptorCommandBus implements CommandBus {
      * <li>The {@link WaitStrategy} defaults to a {@link BlockingWaitStrategy}.</li>
      * <li>The {@code invokerThreadCount} defaults to {@code 1}.</li>
      * <li>The {@link Cache} defaults to {@link NoCache#INSTANCE}.</li>
+     * <li>The {@link DuplicateCommandHandlerResolver} defaults to {@link DuplicateCommandHandlerResolution#logAndOverride()}.</li>
      * </ul>
      * The (2) Threads required for command execution are created immediately. Additional threads are used to invoke
-     * response callbacks and to initialize a recovery process in the case of errors. The thread creation process can be
-     * specified by providing an {@link Executor}.
+     * response callbacks and to initialize a recovery process in the case of errors. The thread creation process can
+     * be specified by providing an {@link Executor}.
      * <p>
      * The {@link CommandTargetResolver}, {@link MessageMonitor}, {@link RollbackConfiguration}, {@link ProducerType},
      * {@link WaitStrategy} and {@link Cache} are a <b>hard requirements</b>. Thus setting them to {@code null} will
@@ -751,7 +605,7 @@ public class DisruptorCommandBus implements CommandBus {
         private Executor executor;
         private boolean rescheduleCommandsOnCorruptState = true;
         private long coolingDownPeriod = 1000;
-        private CommandTargetResolver commandTargetResolver = new AnnotationCommandTargetResolver();
+        private CommandTargetResolver commandTargetResolver = AnnotationCommandTargetResolver.builder().build();
         private int publisherThreadCount = 1;
         private MessageMonitor<? super CommandMessage<?>> messageMonitor = NoOpMessageMonitor.INSTANCE;
         private TransactionManager transactionManager;
@@ -761,6 +615,8 @@ public class DisruptorCommandBus implements CommandBus {
         private WaitStrategy waitStrategy = new BlockingWaitStrategy();
         private int invokerThreadCount = 1;
         private Cache cache = NoCache.INSTANCE;
+        private DuplicateCommandHandlerResolver duplicateCommandHandlerResolver = DuplicateCommandHandlerResolution.logAndOverride();
+        private CommandCallback<Object, Object> defaultCommandCallback = FailureLoggingCommandCallback.INSTANCE;
 
         /**
          * Set the {@link MessageHandlerInterceptor} of generic type {@link CommandMessage} to use with the
@@ -979,7 +835,6 @@ public class DisruptorCommandBus implements CommandBus {
          *
          * @param waitStrategy The WaitStrategy to use
          * @return the current Builder instance, for fluent interfacing
-         *
          * @see com.lmax.disruptor.SleepingWaitStrategy SleepingWaitStrategy
          * @see com.lmax.disruptor.BlockingWaitStrategy BlockingWaitStrategy
          * @see com.lmax.disruptor.BusySpinWaitStrategy BusySpinWaitStrategy
@@ -1025,6 +880,35 @@ public class DisruptorCommandBus implements CommandBus {
         }
 
         /**
+         * Sets the {@link DuplicateCommandHandlerResolver} used to resolves the road to take when a duplicate command
+         * handler is subscribed. Defaults to {@link DuplicateCommandHandlerResolution#logAndOverride() Log and Override}.
+         *
+         * @param duplicateCommandHandlerResolver a {@link DuplicateCommandHandlerResolver} used to resolves the road to
+         *                                        take when a duplicate command handler is subscribed
+         * @return the current Builder instance, for fluent interfacing
+         */
+        public Builder duplicateCommandHandlerResolver(
+                DuplicateCommandHandlerResolver duplicateCommandHandlerResolver) {
+            assertNonNull(duplicateCommandHandlerResolver, "DuplicateCommandHandlerResolver may not be null");
+            this.duplicateCommandHandlerResolver = duplicateCommandHandlerResolver;
+            return this;
+        }
+
+        /**
+         * Sets the callback to use when commands are dispatched in a "fire and forget" method, such as
+         * {@link #dispatch(CommandMessage)}. Defaults to a {@link FailureLoggingCommandCallback}, which logs failed
+         * commands to a logger. Passing {@code null} will result in a {@link NoOpCallback} being used.
+         *
+         * @param defaultCommandCallback the callback to invoke when no explicit callback is provided for a command
+         * @return the current Builder instance, for fluent interfacing
+         */
+        public Builder defaultCommandCallback(CommandCallback<Object, Object> defaultCommandCallback) {
+            this.defaultCommandCallback = getOrDefault(defaultCommandCallback, NoOpCallback.INSTANCE);
+            return this;
+        }
+
+
+        /**
          * Initializes a {@link DisruptorCommandBus} as specified through this Builder.
          *
          * @return a {@link DisruptorCommandBus} as specified through this Builder
@@ -1061,6 +945,136 @@ public class DisruptorCommandBus implements CommandBus {
 
         private void assertInvokerThreadCount(int invokerThreadCount) {
             assertThat(invokerThreadCount, count -> count > 0, "The invoker thread count must be at least 1");
+        }
+    }
+
+    private class DisruptorRepository<T> implements Repository<T> {
+
+        private final Class<T> type;
+
+        public DisruptorRepository(Class<T> type) {
+            this.type = type;
+        }
+
+        @SuppressWarnings("unchecked")
+        @Override
+        public Aggregate<T> load(String aggregateIdentifier, Long expectedVersion) {
+            return (Aggregate<T>) CommandHandlerInvoker.getRepository(type).load(aggregateIdentifier, expectedVersion);
+        }
+
+        @SuppressWarnings("unchecked")
+        @Override
+        public Aggregate<T> load(String aggregateIdentifier) {
+            return (Aggregate<T>) CommandHandlerInvoker.getRepository(type).load(aggregateIdentifier);
+        }
+
+        @Override
+        public Aggregate<T> newInstance(Callable<T> factoryMethod) throws Exception {
+            return CommandHandlerInvoker.<T>getRepository(type).newInstance(factoryMethod);
+        }
+
+        @Override
+        public void send(Message<?> message, ScopeDescriptor scopeDescription) throws Exception {
+            CompletableFuture future = new CompletableFuture();
+            send(message, scopeDescription, future);
+            try {
+                future.get();
+            } catch (ExecutionException e) {
+                if (e.getCause() instanceof Exception) {
+                    throw (Exception) e.getCause();
+                }
+                throw e;
+            }
+        }
+
+        @SuppressWarnings("Duplicates")
+        private void send(Message<?> message, ScopeDescriptor scopeDescription, CompletableFuture<?> future) {
+            if (!canResolve(scopeDescription)) {
+                future.complete(null);
+                return;
+            }
+
+            String aggregateIdentifier = ((AggregateScopeDescriptor) scopeDescription).getIdentifier().toString();
+
+            RingBuffer<CommandHandlingEntry> ringBuffer = disruptor.getRingBuffer();
+            int invokerSegment = 0;
+            int publisherSegment = 0;
+            if (commandHandlerInvokers.length > 1 || publisherCount > 1) {
+                if (aggregateIdentifier != null) {
+                    int idHash = aggregateIdentifier.hashCode() & Integer.MAX_VALUE;
+                    if (commandHandlerInvokers.length > 1) {
+                        invokerSegment = idHash % commandHandlerInvokers.length;
+                    }
+                    if (publisherCount > 1) {
+                        publisherSegment = idHash % publisherCount;
+                    }
+                }
+            }
+
+            long sequence = ringBuffer.next();
+            try {
+                CommandHandlingEntry event = ringBuffer.get(sequence);
+                event.resetAsCallable(
+                        () -> {
+                            try {
+                                return load(aggregateIdentifier).handle(message);
+                            } catch (AggregateNotFoundException e) {
+                                logger.debug("Aggregate (with id: [{}]) cannot be loaded. "
+                                                     + "Hence, message '[{}]' cannot be handled.",
+                                             aggregateIdentifier, message);
+                            }
+                            return null;
+                        },
+                        invokerSegment,
+                        publisherSegment,
+                        new BlacklistDetectingCallback<>(
+                                new CommandCallback<Object, Object>() {
+                                    @Override
+                                    public void onResult(CommandMessage<?> commandMessage,
+                                                         CommandResultMessage<?> commandResultMessage) {
+                                        if (commandResultMessage.isExceptional()) {
+                                            logger.warn("Failed sending message [{}] to aggregate with id [{}]",
+                                                        message, aggregateIdentifier);
+                                            future.completeExceptionally(commandResultMessage.exceptionResult());
+                                        } else {
+                                            future.complete(null);
+                                        }
+                                    }
+                                },
+                                disruptor.getRingBuffer(),
+                                (commandMessage, callback) -> send(message, scopeDescription, future),
+                                rescheduleOnCorruptState
+                        )
+                );
+            } finally {
+                ringBuffer.publish(sequence);
+            }
+        }
+
+        @Override
+        public boolean canResolve(ScopeDescriptor scopeDescription) {
+            return scopeDescription instanceof AggregateScopeDescriptor
+                    && Objects.equals(type.getSimpleName(), ((AggregateScopeDescriptor) scopeDescription).getType());
+        }
+    }
+
+    private class ExceptionHandler implements com.lmax.disruptor.ExceptionHandler {
+
+        @Override
+        public void handleEventException(Throwable ex, long sequence, Object event) {
+            logger.error("Exception occurred while processing a {}.",
+                         ((CommandHandlingEntry) event).getMessage().getPayloadType().getSimpleName(), ex);
+        }
+
+        @Override
+        public void handleOnStartException(Throwable ex) {
+            logger.error("Failed to start the DisruptorCommandBus.", ex);
+            disruptor.shutdown();
+        }
+
+        @Override
+        public void handleOnShutdownException(Throwable ex) {
+            logger.error("Error while shutting down the DisruptorCommandBus", ex);
         }
     }
 }

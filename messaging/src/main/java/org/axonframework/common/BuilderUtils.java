@@ -38,7 +38,7 @@ public abstract class BuilderUtils {
      *
      * @param value            a {@code T} specifying the value to assert
      * @param assertion        a {@link Predicate} to test {@code value} against
-     * @param exceptionMessage a {@link Supplier} of the exception {@code X} if {@code assertion} evaluates to false
+     * @param exceptionMessage The message for the exception.
      * @param <T>              a generic specifying the type of the {@code value}, which is the input for the
      *                         {@code assertion}
      * @throws AxonConfigurationException if the {@code value} asserts to {@code false} by the {@code assertion}
@@ -53,12 +53,57 @@ public abstract class BuilderUtils {
      * Assert that the given {@code value} is non null. If not, an {@link AxonConfigurationException} is thrown
      * containing the provided {@code exceptionMessage}.
      *
-     * @param value a {@code T} specifying the value to assert
-     * @param <T>   a generic specifying the type of the {@code value}, which is the input for the
-     *              {@code assertion}
+     * @param value            a {@code T} specifying the value to assert
+     * @param exceptionMessage The message for the exception.
+     * @param <T>              a generic specifying the type of the {@code value}, which is the input for the
+     *                         {@code assertion}
      * @throws AxonConfigurationException if the {@code value} equals {@code null}
      */
     public static <T> void assertNonNull(T value, String exceptionMessage) throws AxonConfigurationException {
         assertThat(value, Objects::nonNull, exceptionMessage);
+    }
+
+    /**
+     * Assert that the given {@code value} is positive, meaning greater than, or equal to, zero. If not, an
+     * {@link AxonConfigurationException} is thrown containing the provided {code exceptionMessage}.
+     *
+     * @param i                the value to assert
+     * @param exceptionMessage the message for the exception
+     */
+    public static void assertPositive(int i, String exceptionMessage) {
+        assertThat(i, number -> number >= 0, exceptionMessage);
+    }
+
+    /**
+     * Assert that the given {@code value} is positive, meaning greater than, or equal to, zero. If not, an
+     * {@link AxonConfigurationException} is thrown containing the provided {code exceptionMessage}.
+     *
+     * @param l                the value to assert
+     * @param exceptionMessage the message for the exception
+     */
+    public static void assertPositive(long l, String exceptionMessage) {
+        assertThat(l, number -> number >= 0, exceptionMessage);
+    }
+
+    /**
+     * Assert that the given {@code value} is strictly positive, meaning greater than zero. If not, an
+     * {@link AxonConfigurationException} is thrown containing the provided {code exceptionMessage}.
+     *
+     * @param i                the value to assert
+     * @param exceptionMessage the message for the exception.
+     */
+    public static void assertStrictPositive(int i, String exceptionMessage) {
+        assertThat(i, number -> number > 0, exceptionMessage);
+    }
+
+    /**
+     * Assert that the given {@code value} is strictly positive, meaning greater than zero. If not, an
+     * {@link AxonConfigurationException} is thrown containing the provided {code exceptionMessage}.
+     *
+     * @param l                the value to assert
+     * @param exceptionMessage the message for the exception.
+     */
+    public static void assertStrictPositive(long l, String exceptionMessage) {
+        assertThat(l, number -> number > 0L, exceptionMessage);
     }
 }

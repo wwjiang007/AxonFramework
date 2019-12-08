@@ -29,8 +29,9 @@ import org.axonframework.messaging.unitofwork.UnitOfWork;
 import org.axonframework.modelling.command.Aggregate;
 import org.axonframework.modelling.command.AggregateIdentifier;
 import org.axonframework.modelling.command.AggregateLifecycle;
+import org.axonframework.modelling.command.AggregateRoot;
 import org.axonframework.modelling.command.ConflictingAggregateVersionException;
-import org.junit.*;
+import org.junit.jupiter.api.*;
 import org.mockito.*;
 
 import java.util.ArrayList;
@@ -38,13 +39,13 @@ import java.util.List;
 import java.util.UUID;
 
 import static org.axonframework.messaging.MetaData.emptyInstance;
-import static org.junit.Assert.*;
+import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
 
 /**
  * @author Allard Buijze
  */
-public class EventSourcingRepositoryTest {
+class EventSourcingRepositoryTest {
 
     private EventStore mockEventStore;
     private EventSourcingRepository<TestAggregate> testSubject;
@@ -53,8 +54,8 @@ public class EventSourcingRepositoryTest {
     private SnapshotTriggerDefinition triggerDefinition;
     private SnapshotTrigger snapshotTrigger;
 
-    @Before
-    public void setUp() {
+    @BeforeEach
+    void setUp() {
         mockEventStore = mock(EventStore.class);
         stubAggregateFactory = new StubAggregateFactory();
         snapshotTrigger = mock(SnapshotTrigger.class);
@@ -64,20 +65,20 @@ public class EventSourcingRepositoryTest {
                                              .aggregateFactory(stubAggregateFactory)
                                              .eventStore(mockEventStore)
                                              .snapshotTriggerDefinition(triggerDefinition)
+                                             .filterByAggregateType()
                                              .build();
         unitOfWork = DefaultUnitOfWork.startAndGet(new GenericMessage<>("test"));
     }
 
-    @After
-    public void tearDown() {
+    @AfterEach
+    void tearDown() {
         if (unitOfWork.isActive()) {
             unitOfWork.rollback();
         }
     }
 
     @Test
-    @SuppressWarnings("unchecked")
-    public void testLoadAndSaveAggregate() {
+    void testLoadAndSaveAggregate() {
         String identifier = UUID.randomUUID().toString();
         DomainEventMessage event1 =
                 new GenericDomainEventMessage<>("type", identifier, (long) 1, "Mock contents", emptyInstance());
@@ -100,13 +101,30 @@ public class EventSourcingRepositoryTest {
 
         CurrentUnitOfWork.commit();
 
-        verify(mockEventStore, times(1)).publish((EventMessage) anyVararg());
+        verify(mockEventStore, times(1)).publish((EventMessage) any());
         assertEquals(1, aggregate.invoke(TestAggregate::getLiveEvents).size());
         assertSame(event3, aggregate.invoke(TestAggregate::getLiveEvents).get(0).getPayload());
     }
 
     @Test
-    public void testLoad_FirstEventIsSnapshot() {
+    void testFilterEventsByType() {
+        String identifier = UUID.randomUUID().toString();
+        DomainEventMessage event1 =
+                new GenericDomainEventMessage<>("type", identifier, (long) 1, "Mock contents", emptyInstance());
+        DomainEventMessage event2 =
+                new GenericDomainEventMessage<>("otherType", identifier, (long) 1, "Other contents", emptyInstance());
+        when(mockEventStore.readEvents(identifier)).thenReturn(DomainEventStream.of(event1, event2));
+
+        Aggregate<TestAggregate> aggregate = testSubject.load(identifier, null);
+
+        assertEquals(1, aggregate.invoke(TestAggregate::getHandledEvents).size());
+        assertSame(event1, aggregate.invoke(TestAggregate::getHandledEvents).get(0));
+
+        assertEquals(0, aggregate.invoke(TestAggregate::getLiveEvents).size());
+    }
+
+    @Test
+    void testLoad_FirstEventIsSnapshot() {
         String identifier = UUID.randomUUID().toString();
         TestAggregate aggregate = new TestAggregate(identifier);
         when(mockEventStore.readEvents(identifier)).thenReturn(
@@ -115,7 +133,7 @@ public class EventSourcingRepositoryTest {
     }
 
     @Test
-    public void testLoadWithConflictingChanges() {
+    void testLoadWithConflictingChanges() {
         String identifier = UUID.randomUUID().toString();
         when(mockEventStore.readEvents(identifier)).thenReturn(DomainEventStream.of(
                 new GenericDomainEventMessage<>("type", identifier, (long) 1, "Mock contents", emptyInstance()),
@@ -135,7 +153,7 @@ public class EventSourcingRepositoryTest {
     }
 
     @Test
-    public void testLoadWithConflictingChanges_NoConflictResolverSet_UsingTooHighExpectedVersion() {
+    void testLoadWithConflictingChanges_NoConflictResolverSet_UsingTooHighExpectedVersion() {
         String identifier = UUID.randomUUID().toString();
         when(mockEventStore.readEvents(identifier)).thenReturn(DomainEventStream.of(
                 new GenericDomainEventMessage<>("type", identifier, (long) 1, "Mock contents", emptyInstance()),
@@ -154,7 +172,7 @@ public class EventSourcingRepositoryTest {
     }
 
     @Test
-    public void testLoadEventsWithSnapshotter() {
+    void testLoadEventsWithSnapshotter() {
         String identifier = UUID.randomUUID().toString();
         when(mockEventStore.readEvents(identifier)).thenReturn(DomainEventStream.of(
                 new GenericDomainEventMessage<>("type", identifier, (long) 1, "Mock contents", emptyInstance()),
@@ -189,6 +207,7 @@ public class EventSourcingRepositoryTest {
         }
     }
 
+    @AggregateRoot(type = "type")
     private static class TestAggregate {
 
         private List<EventMessage<?>> handledEvents = new ArrayList<>();

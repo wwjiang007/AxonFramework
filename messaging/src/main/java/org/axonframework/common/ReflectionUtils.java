@@ -1,11 +1,11 @@
 /*
- * Copyright (c) 2010-2018. Axon Framework
+ * Copyright (c) 2010-2019. Axon Framework
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *    http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -20,6 +20,8 @@ import java.lang.reflect.*;
 import java.security.AccessController;
 import java.util.*;
 
+import static org.axonframework.common.ObjectUtils.getOrDefault;
+
 /**
  * Utility class for working with Java Reflection API.
  *
@@ -31,7 +33,7 @@ public abstract class ReflectionUtils {
     /**
      * A map of Primitive types to their respective wrapper types.
      */
-    private static final Map<Class<?>, Class<?>> primitiveWrapperTypeMap = new HashMap<>(8);
+    private static final Map<Type, Class<?>> primitiveWrapperTypeMap = new HashMap<>(8);
 
     static {
         primitiveWrapperTypeMap.put(boolean.class, Boolean.class);
@@ -59,7 +61,7 @@ public abstract class ReflectionUtils {
         ensureAccessible(field);
         try {
             return (R) field.get(object);
-        } catch(IllegalArgumentException | IllegalAccessException ex) {
+        } catch (IllegalArgumentException | IllegalAccessException ex) {
             throw new IllegalStateException("Unable to access field for getting.", ex);
         }
     }
@@ -77,7 +79,7 @@ public abstract class ReflectionUtils {
         ensureAccessible(field);
         try {
             field.set(object, value);
-        } catch(IllegalAccessException ex) {
+        } catch (IllegalAccessException ex) {
             throw new IllegalStateException("Unable to access field for setting.", ex);
         }
     }
@@ -96,7 +98,7 @@ public abstract class ReflectionUtils {
     public static Class<?> declaringClass(Class<?> instanceClass, String methodName, Class<?>... parameterTypes) {
         try {
             return instanceClass.getMethod(methodName, parameterTypes).getDeclaringClass();
-        } catch(NoSuchMethodException e) {
+        } catch (NoSuchMethodException e) {
             return null;
         }
     }
@@ -160,7 +162,7 @@ public abstract class ReflectionUtils {
      * @return {@code true} if the member is accessible, otherwise {@code false}.
      */
     public static boolean isAccessible(AccessibleObject member) {
-        return member.isAccessible() || (Member.class.isInstance(member) && isNonFinalPublicMember((Member) member));
+        return member.isAccessible() || (member instanceof Member && isNonFinalPublicMember((Member) member));
     }
 
     /**
@@ -245,6 +247,48 @@ public abstract class ReflectionUtils {
         Class<?> primitiveWrapperType = primitiveWrapperTypeMap.get(primitiveType);
         Assert.notNull(primitiveWrapperType, () -> "no wrapper found for primitiveType: " + primitiveType);
         return primitiveWrapperType;
+    }
+
+    /**
+     * Returns the boxed wrapper type for the given {@code type} if it is primitive.
+     *
+     * @param type a {@link Type} to return boxed wrapper type for
+     * @return the boxed wrapper type for the give {@code type}, or {@code type} if no wrapper class was found.
+     */
+    public static Type resolvePrimitiveWrapperTypeIfPrimitive(Type type) {
+        Assert.notNull(type, () -> "type may not be null");
+        return getOrDefault(primitiveWrapperTypeMap.get(type), type);
+    }
+
+    /**
+     * Unwrap the given {@code type} if is wrapped by any of the given {@code wrapperTypes}. This method assumes that
+     * the {@code wrapperTypes} have a single generic argument, which identifies the type they wrap.
+     * <p/>
+     * For example, if invoked with {@code Future.class} and {@code Optional.class} as {@code wrapperTypes}:
+     * <ul>
+     * <li> {@code Future<String>} resolves to {@code String}</li>
+     * <li> {@code Optional<String>} resolves to {@code String}</li>
+     * <li> {@code Optional<Future<List<String>>>} resolves to {@code List<String>}</li>
+     * </ul>
+     *
+     * @param type         The type to unwrap, if wrapped
+     * @param wrapperTypes The wrapper types to unwrap
+     * @return the unwrapped Type, or the original if it wasn't wrapped in any of the given wrapper types
+     */
+    public static Type unwrapIfType(Type type, Class<?>... wrapperTypes) {
+        for (Class<?> wrapperType : wrapperTypes) {
+            Type wrapper = TypeReflectionUtils.getExactSuperType(type, wrapperType);
+            if (wrapper instanceof ParameterizedType) {
+                Type[] actualTypeArguments = ((ParameterizedType) wrapper).getActualTypeArguments();
+                if (actualTypeArguments.length == 1) {
+                    return unwrapIfType(actualTypeArguments[0], wrapperTypes);
+                }
+            } else if (wrapperType.equals(type)) {
+                // the wrapper type doesn't declare what it wraps. In that case we just know it's an Object
+                return Object.class;
+            }
+        }
+        return type;
     }
 
     private static void addMethodsOnDeclaredInterfaces(Class<?> currentClazz, List<Method> methods) {

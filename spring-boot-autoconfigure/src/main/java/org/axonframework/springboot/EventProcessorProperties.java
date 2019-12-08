@@ -32,10 +32,12 @@
 
 package org.axonframework.springboot;
 
+import org.axonframework.eventhandling.TrackingEventProcessorConfiguration;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 
 import java.util.HashMap;
 import java.util.Map;
+import java.util.concurrent.TimeUnit;
 
 /**
  * Properties describing the settings for Event Processors.
@@ -80,18 +82,33 @@ public class EventProcessorProperties {
         private String source;
 
         /**
-         * Indicates whether this processor should be Tracking, or Subscribing its source.
+         * Indicates whether this processor should be Tracking, or Subscribing its source. Defaults to Tracking.
          */
-        private Mode mode = Mode.SUBSCRIBING;
+        private Mode mode = Mode.TRACKING;
 
         /**
          * Indicates the number of segments that should be created when the processor starts for the first time.
+         * Defaults to 1.
          */
         private int initialSegmentCount = 1;
 
         /**
+         * The interval between attempts to claim tokens by a {@link org.axonframework.eventhandling.TrackingEventProcessor}.
+         *
+         * Defaults to 5000 milliseconds.
+         */
+        private long tokenClaimInterval = 5000;
+
+        /**
+         * The time unit of tokens claim interval.
+         *
+         * Defaults to {@link TimeUnit#MILLISECONDS}.
+         */
+        private TimeUnit tokenClaimIntervalTimeUnit = TimeUnit.MILLISECONDS;
+
+        /**
          * The maximum number of threads the processor should process events with. Defaults to the number of initial
-         * segments if this is not further specified.
+         * segments if this is not further specified. Defaults to 1.
          */
         private int threadCount = -1;
 
@@ -163,6 +180,45 @@ public class EventProcessorProperties {
          */
         public void setInitialSegmentCount(int initialSegmentCount) {
             this.initialSegmentCount = initialSegmentCount;
+        }
+
+        /**
+         * Returns the interval between attempts to claim tokens by a {@link org.axonframework.eventhandling.TrackingEventProcessor}.
+         * Defaults to 5000 milliseconds.
+         *
+         * @return the interval between attempts to claim tokens by a {@link org.axonframework.eventhandling.TrackingEventProcessor}.
+         */
+        public long getTokenClaimInterval() {
+            return tokenClaimInterval;
+        }
+
+        /**
+         * Sets the time to wait after a failed attempt to claim any token, before making another attempt.
+         * Defaults to 5000 milliseconds.
+         *
+         * @param tokenClaimInterval the interval between attempts to claim tokens by a {@link org.axonframework.eventhandling.TrackingEventProcessor}.
+         */
+        public void setTokenClaimInterval(long tokenClaimInterval) {
+            this.tokenClaimInterval = tokenClaimInterval;
+        }
+
+        /**
+         * Returns the time unit used to define tokens claim interval. Defaults to MILLISECONDS.
+         *
+         * @return the time unit used to defined tokens claim interval.
+         */
+        public TimeUnit getTokenClaimIntervalTimeUnit() {
+            return tokenClaimIntervalTimeUnit;
+        }
+
+        /**
+         * Sets the time unit used to defined tokens claim interval. It must be a valid value of {@link TimeUnit}.
+         * Defaults to MILLISECONDS.
+         *
+         * @param tokenClaimIntervalTimeUnit the time unit used to defined tokens claim interval.
+         */
+        public void setTokenClaimIntervalTimeUnit(TimeUnit tokenClaimIntervalTimeUnit) {
+            this.tokenClaimIntervalTimeUnit = tokenClaimIntervalTimeUnit;
         }
 
         /**

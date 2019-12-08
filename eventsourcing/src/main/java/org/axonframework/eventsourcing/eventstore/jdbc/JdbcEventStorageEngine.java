@@ -1,11 +1,11 @@
 /*
- * Copyright (c) 2010-2018. Axon Framework
+ * Copyright (c) 2010-2019. Axon Framework
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *    http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -16,7 +16,6 @@
 
 package org.axonframework.eventsourcing.eventstore.jdbc;
 
-import org.axonframework.modelling.command.ConcurrencyException;
 import org.axonframework.common.AxonConfigurationException;
 import org.axonframework.common.DateTimeUtils;
 import org.axonframework.common.jdbc.ConnectionProvider;
@@ -24,18 +23,11 @@ import org.axonframework.common.jdbc.JdbcUtils;
 import org.axonframework.common.jdbc.PersistenceExceptionResolver;
 import org.axonframework.common.transaction.Transaction;
 import org.axonframework.common.transaction.TransactionManager;
-import org.axonframework.eventhandling.DomainEventData;
-import org.axonframework.eventhandling.DomainEventMessage;
-import org.axonframework.eventhandling.EventMessage;
-import org.axonframework.eventhandling.GapAwareTrackingToken;
-import org.axonframework.eventhandling.GenericDomainEventEntry;
-import org.axonframework.eventhandling.GenericEventMessage;
-import org.axonframework.eventhandling.TrackedDomainEventData;
-import org.axonframework.eventhandling.TrackedEventData;
-import org.axonframework.eventhandling.TrackingToken;
+import org.axonframework.eventhandling.*;
 import org.axonframework.eventsourcing.eventstore.BatchingEventStorageEngine;
 import org.axonframework.eventsourcing.eventstore.EventStoreException;
 import org.axonframework.eventsourcing.eventstore.jpa.JpaEventStorageEngine;
+import org.axonframework.modelling.command.ConcurrencyException;
 import org.axonframework.serialization.SerializedObject;
 import org.axonframework.serialization.Serializer;
 import org.axonframework.serialization.upcasting.event.EventUpcaster;
@@ -49,12 +41,7 @@ import java.sql.SQLException;
 import java.time.Instant;
 import java.time.format.DateTimeParseException;
 import java.time.temporal.ChronoUnit;
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.List;
-import java.util.Optional;
-import java.util.SortedSet;
-import java.util.TreeSet;
+import java.util.*;
 import java.util.function.Predicate;
 import java.util.stream.Collectors;
 import java.util.stream.LongStream;
@@ -85,6 +72,7 @@ public class JdbcEventStorageEngine extends BatchingEventStorageEngine {
     private static final long DEFAULT_LOWEST_GLOBAL_SEQUENCE = 1;
     private static final int DEFAULT_GAP_TIMEOUT = 60000;
     private static final int DEFAULT_GAP_CLEANING_THRESHOLD = 250;
+    private static final boolean DEFAULT_EXTENDED_GAP_CHECK_ENABLED = true;
 
     private final ConnectionProvider connectionProvider;
     private final TransactionManager transactionManager;
@@ -92,6 +80,7 @@ public class JdbcEventStorageEngine extends BatchingEventStorageEngine {
     private final EventSchema schema;
     private final int maxGapOffset;
     private final long lowestGlobalSequence;
+    private final boolean extendedGapCheckEnabled;
     private int gapTimeout;
     private int gapCleaningThreshold;
 
@@ -113,6 +102,7 @@ public class JdbcEventStorageEngine extends BatchingEventStorageEngine {
         this.maxGapOffset = builder.maxGapOffset;
         this.gapTimeout = builder.gapTimeout;
         this.gapCleaningThreshold = builder.gapCleaningThreshold;
+        this.extendedGapCheckEnabled = builder.extendedGapCheckEnabled;
     }
 
     /**
@@ -132,6 +122,7 @@ public class JdbcEventStorageEngine extends BatchingEventStorageEngine {
      * <li>The {@code lowestGlobalSequence} defaults to a long of size {@code 1}.</li>
      * <li>The {@code gapTimeout} defaults to an integer of size {@code 60000} (1 minute).</li>
      * <li>The {@code gapCleaningThreshold} defaults to an integer of size {@code 250}.</li>
+     * <li>The {@code extendedGapCheckEnabled} defaults to {@code true}.</li>
      * </ul>
      * <p>
      * The {@link ConnectionProvider} and {@link TransactionManager} are <b>hard requirements</b> and as such should
@@ -339,10 +330,15 @@ public class JdbcEventStorageEngine extends BatchingEventStorageEngine {
     }
 
     @Override
+    protected boolean fetchForAggregateUntilEmpty() {
+        return true;
+    }
+
+    @Override
     protected List<? extends TrackedEventData<?>> fetchTrackedEvents(TrackingToken lastToken, int batchSize) {
         isTrue(lastToken == null || lastToken instanceof GapAwareTrackingToken,
                () -> "Unsupported token format: " + lastToken);
-        return transactionManager.fetchInTransaction(() -> {
+        List<TrackedEventData<?>> trackedEventData = transactionManager.fetchInTransaction(() -> {
             // If there are many gaps, it worthwhile checking if it is possible to clean them up.
             GapAwareTrackingToken cleanedToken;
             if (lastToken != null && ((GapAwareTrackingToken) lastToken).getGaps().size() > gapCleaningThreshold) {
@@ -351,22 +347,51 @@ public class JdbcEventStorageEngine extends BatchingEventStorageEngine {
                 cleanedToken = (GapAwareTrackingToken) lastToken;
             }
 
-            return executeQuery(
-                    getConnection(),
-                    connection -> readEventData(connection, cleanedToken, batchSize),
-                    resultSet -> {
-                        GapAwareTrackingToken previousToken = cleanedToken;
-                        List<TrackedEventData<?>> results = new ArrayList<>();
-                        while (resultSet.next()) {
-                            TrackedEventData<?> next = getTrackedEventData(resultSet, previousToken);
-                            results.add(next);
-                            previousToken = (GapAwareTrackingToken) next.trackingToken();
-                        }
-                        return results;
-                    },
-                    e -> new EventStoreException(format("Failed to read events from token [%s]", lastToken), e)
-            );
+            List<TrackedEventData<?>> eventData = executeEventDataQuery(cleanedToken, batchSize);
+
+            // Additional check for empty batches. This may be because there is a gap of more than _batchSize_ items ahead
+            // see
+            if (extendedGapCheckEnabled && eventData.isEmpty()) {
+                long index = cleanedToken == null ? -1 : cleanedToken.getIndex();
+                Long result = executeQuery(getConnection(),
+                                           connection -> {
+                                               PreparedStatement stat = connection.prepareStatement(
+                                                       format("SELECT min(%s) FROM %s WHERE %s > ?",
+                                                              schema.globalIndexColumn(),
+                                                              schema.domainEventTable(),
+                                                              schema.globalIndexColumn()));
+                                               stat.setLong(1, index);
+                                               return stat;
+                                           },
+                                           resultSet -> nextAndExtract(resultSet, 1, Long.class),
+                                           e -> new EventStoreException("Failed to read globalIndex ahead of token",
+                                                                        e));
+                if (result != null) {
+                    return executeEventDataQuery(cleanedToken, (int) (result - index));
+                }
+            }
+            return eventData;
         });
+
+        return trackedEventData;
+    }
+
+    private List<TrackedEventData<?>> executeEventDataQuery(GapAwareTrackingToken cleanedToken, int batchSize) {
+        return executeQuery(
+                getConnection(),
+                connection -> readEventData(connection, cleanedToken, batchSize),
+                resultSet -> {
+                    GapAwareTrackingToken previousToken = cleanedToken;
+                    List<TrackedEventData<?>> results = new ArrayList<>();
+                    while (resultSet.next()) {
+                        TrackedEventData<?> next = getTrackedEventData(resultSet, previousToken);
+                        results.add(next);
+                        previousToken = (GapAwareTrackingToken) next.trackingToken();
+                    }
+                    return results;
+                },
+                e -> new EventStoreException(format("Failed to read events from token [%s]", cleanedToken), e)
+        );
     }
 
     private GapAwareTrackingToken cleanGaps(TrackingToken lastToken) {
@@ -394,7 +419,7 @@ public class JdbcEventStorageEngine extends BatchingEventStorageEngine {
                         break;
                     }
                     if (gaps.contains(sequenceNumber - 1)) {
-                        cleanToken = cleanToken.advanceTo(sequenceNumber - 1, maxGapOffset, false);
+                        cleanToken = cleanToken.withGapsTruncatedAt(sequenceNumber);
                     }
                 } catch (DateTimeParseException e) {
                     logger.info("Unable to parse timestamp to clean old gaps. "
@@ -541,7 +566,10 @@ public class JdbcEventStorageEngine extends BatchingEventStorageEngine {
                             : Collections.emptySortedSet()
             );
         } else {
-            token = token.advanceTo(globalSequence, maxGapOffset, allowGaps);
+            token = token.advanceTo(globalSequence, maxGapOffset);
+            if (!allowGaps) {
+                token = token.withGapsTruncatedAt(globalSequence);
+            }
         }
         return new TrackedDomainEventData<>(token, domainEvent);
     }
@@ -683,7 +711,9 @@ public class JdbcEventStorageEngine extends BatchingEventStorageEngine {
      * performance of reading events. Defaults to 60000 (1 minute).
      *
      * @param gapTimeout The amount of time, in milliseconds until a gap may be considered timed out.
+     * @deprecated Use the {@link Builder#gapTimeout(int) gapTimeout(int)} in the {@link #builder()} instead
      */
+    @Deprecated
     public void setGapTimeout(int gapTimeout) {
         this.gapTimeout = gapTimeout;
     }
@@ -692,7 +722,9 @@ public class JdbcEventStorageEngine extends BatchingEventStorageEngine {
      * Sets the threshold of number of gaps in a token before an attempt to clean gaps up is taken. Defaults to 250.
      *
      * @param gapCleaningThreshold The number of gaps before triggering a cleanup.
+     * @deprecated Use the {@link Builder#gapCleaningThreshold(int) gapCleaningThreshold(int)} in the {@link #builder()} instead
      */
+    @Deprecated
     public void setGapCleaningThreshold(int gapCleaningThreshold) {
         this.gapCleaningThreshold = gapCleaningThreshold;
     }
@@ -714,6 +746,7 @@ public class JdbcEventStorageEngine extends BatchingEventStorageEngine {
      * <li>The {@code lowestGlobalSequence} defaults to a long of size {@code 1}.</li>
      * <li>The {@code gapTimeout} defaults to an integer of size {@code 60000} (1 minute).</li>
      * <li>The {@code gapCleaningThreshold} defaults to an integer of size {@code 250}.</li>
+     * <li>The {@code extendedGapCheckEnabled} defaults to {@code true}.</li>
      * </ul>
      * <p>
      * The {@link ConnectionProvider} and {@link TransactionManager} are <b>hard requirements</b> and as such should
@@ -729,6 +762,7 @@ public class JdbcEventStorageEngine extends BatchingEventStorageEngine {
         private long lowestGlobalSequence = DEFAULT_LOWEST_GLOBAL_SEQUENCE;
         private int gapTimeout = DEFAULT_GAP_TIMEOUT;
         private int gapCleaningThreshold = DEFAULT_GAP_CLEANING_THRESHOLD;
+        private boolean extendedGapCheckEnabled = DEFAULT_EXTENDED_GAP_CHECK_ENABLED;
 
         private Builder() {
             persistenceExceptionResolver(new JdbcSQLErrorCodesResolver());
@@ -884,6 +918,28 @@ public class JdbcEventStorageEngine extends BatchingEventStorageEngine {
         public Builder gapCleaningThreshold(int gapCleaningThreshold) {
             assertPositive(gapCleaningThreshold, "gapCleaningThreshold");
             this.gapCleaningThreshold = gapCleaningThreshold;
+            return this;
+        }
+
+        /**
+         * Indicates whether an extra query should be performed to verify for gaps in the {@code globalSequence} larger
+         * than the configured batch size. These gaps could trick the storage engine into believing there are no more
+         * events to read, while there are still positions ahead.
+         * <p>
+         * This check comes at a cost of an extra query when a batch retrieval yields an empty result. This may increase
+         * database pressure when processors are at the HEAD of a stream, as each batch retrieval will result in an
+         * extra query, if there are no results.
+         * <p>
+         * Note that the extra query checks for the smallest globalSequence, higher than the last one seen. This query
+         * can be executed using an index, which should be a relatively cheap query for most databases.
+         * <p>
+         * Defaults to {@code true}
+         *
+         * @param extendedGapCheckEnabled whether to enable the "extended gap check". Defaults to {@code true}.
+         * @return the current Builder instance, for fluent interfacing
+         */
+        public Builder extendedGapCheckEnabled(boolean extendedGapCheckEnabled) {
+            this.extendedGapCheckEnabled = extendedGapCheckEnabled;
             return this;
         }
 
