@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2010-2018. Axon Framework
+ * Copyright (c) 2010-2020. Axon Framework
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -80,5 +80,29 @@ public interface EventScheduler {
             cancelSchedule(scheduleToken);
         }
         return schedule(triggerDuration, event);
+    }
+
+    /**
+     * Cancel a scheduled event and schedule another in its place.
+     * <p/>
+     * Convenience method around {@link #cancelSchedule(ScheduleToken)} and {@link #schedule(Duration, Object)}.
+     *
+     * @param scheduleToken   the token returned when the event was scheduled, might be null
+     * @param instant The moment in time to wait before publishing the event
+     * @param event           The event to publish
+     * @throws IllegalArgumentException if the token belongs to another scheduler
+     * @return the token to use when cancelling the schedule
+     */
+    default ScheduleToken reschedule(ScheduleToken scheduleToken, Instant instant, Object event) {
+        if (null != scheduleToken) {
+            cancelSchedule(scheduleToken);
+        }
+        return schedule(instant, event);
+    }
+
+    /**
+     * Shuts down this event scheduler.
+     */
+    default void shutdown() {
     }
 }

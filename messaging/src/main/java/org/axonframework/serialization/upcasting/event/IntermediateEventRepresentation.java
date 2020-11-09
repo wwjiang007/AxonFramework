@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2010-2018. Axon Framework
+ * Copyright (c) 2010-2020. Axon Framework
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -126,8 +126,7 @@ public interface IntermediateEventRepresentation {
     Optional<TrackingToken> getTrackingToken();
 
     /**
-     * Returns the timestamp at which the event was first created. Will return {@code null} if the object being
-     * upcast
+     * Returns the timestamp at which the event was first created. Will return {@code null} if the object being upcast
      *
      * @return the timestamp at which the event was first created, if available
      */
@@ -140,4 +139,12 @@ public interface IntermediateEventRepresentation {
      * @return the MetaData of the message wrapping the object to upcast, if available
      */
     LazyDeserializingObject<MetaData> getMetaData();
+
+    /**
+     * Checks if the data can be converted to the given {@code requiredType}.
+     *
+     * @param requiredType the type to validate if the contained data can be converted to.
+     * @return true, if the intermediate representation's data can be converted to desired type, false otherwise
+     */
+    boolean canConvertDataTo(Class<?> requiredType);
 }

@@ -1,11 +1,11 @@
 /*
- * Copyright (c) 2010-2019. Axon Framework
+ * Copyright (c) 2010-2020. Axon Framework
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *     http://www.apache.org/licenses/LICENSE-2.0
+ *    http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -17,19 +17,22 @@
 package org.axonframework.axonserver.connector.query;
 
 import com.google.protobuf.ByteString;
+import io.axoniq.axonserver.connector.AxonServerConnection;
+import io.axoniq.axonserver.connector.ResultStream;
+import io.axoniq.axonserver.connector.query.QueryChannel;
+import io.axoniq.axonserver.connector.query.QueryDefinition;
+import io.axoniq.axonserver.grpc.ErrorMessage;
 import io.axoniq.axonserver.grpc.SerializedObject;
-import io.axoniq.axonserver.grpc.query.QueryProviderInbound;
-import io.axoniq.axonserver.grpc.query.QueryProviderOutbound;
-import io.axoniq.axonserver.grpc.query.QueryRequest;
-import io.grpc.stub.StreamObserver;
+import io.axoniq.axonserver.grpc.query.QueryResponse;
 import org.axonframework.axonserver.connector.AxonServerConfiguration;
 import org.axonframework.axonserver.connector.AxonServerConnectionManager;
 import org.axonframework.axonserver.connector.ErrorCode;
 import org.axonframework.axonserver.connector.TargetContextResolver;
-import org.axonframework.axonserver.connector.TestStreamObserver;
 import org.axonframework.axonserver.connector.TestTargetContextResolver;
+import org.axonframework.axonserver.connector.util.ProcessingInstructionHelper;
 import org.axonframework.common.Registration;
-import org.axonframework.messaging.MetaData;
+import org.axonframework.lifecycle.ShutdownInProgressException;
+import org.axonframework.messaging.MessageHandlerInterceptor;
 import org.axonframework.messaging.responsetypes.InstanceResponseType;
 import org.axonframework.queryhandling.GenericQueryMessage;
 import org.axonframework.queryhandling.GenericSubscriptionQueryMessage;
@@ -37,107 +40,109 @@ import org.axonframework.queryhandling.QueryBus;
 import org.axonframework.queryhandling.QueryExecutionException;
 import org.axonframework.queryhandling.QueryMessage;
 import org.axonframework.queryhandling.QueryResponseMessage;
-import org.axonframework.queryhandling.SimpleQueryBus;
+import org.axonframework.queryhandling.SimpleQueryUpdateEmitter;
 import org.axonframework.queryhandling.SubscriptionQueryMessage;
 import org.axonframework.serialization.Serializer;
 import org.axonframework.serialization.xml.XStreamSerializer;
-import org.junit.*;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
 
+import java.util.Arrays;
 import java.util.Collections;
+import java.util.Iterator;
 import java.util.LinkedList;
 import java.util.List;
+import java.util.Optional;
+import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.atomic.AtomicReference;
 
-import static org.axonframework.axonserver.connector.ErrorCode.UNSUPPORTED_INSTRUCTION;
-import static org.axonframework.axonserver.connector.TestTargetContextResolver.BOUNDED_CONTEXT;
 import static org.axonframework.axonserver.connector.utils.AssertUtils.assertWithin;
-import static org.axonframework.common.ObjectUtils.getOrDefault;
 import static org.axonframework.messaging.responsetypes.ResponseTypes.instanceOf;
-import static org.junit.Assert.*;
-import static org.mockito.ArgumentMatchers.*;
-import static org.mockito.Mockito.anyString;
-import static org.mockito.Mockito.*;
+import static org.axonframework.messaging.responsetypes.ResponseTypes.optionalInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.fail;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.argThat;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 /**
  * Unit test suite to verify the {@link AxonServerQueryBus}.
  *
  * @author Marc Gathier
  */
-public class AxonServerQueryBusTest {
+class AxonServerQueryBusTest {
 
-    private DummyMessagePlatformServer dummyMessagePlatformServer;
+    private static final String TEST_QUERY = "testQuery";
+    public static final String CONTEXT = "default-test";
 
     private AxonServerConnectionManager axonServerConnectionManager;
-    private AxonServerConfiguration configuration;
-    private QueryBus localSegment = SimpleQueryBus.builder().build();
-    private Serializer serializer = XStreamSerializer.defaultSerializer();
-    private TargetContextResolver<QueryMessage<?, ?>> targetContextResolver = spy(new TestTargetContextResolver<>());
+    private final QueryBus localSegment = mock(QueryBus.class);
+    private final Serializer serializer = XStreamSerializer.defaultSerializer();
+    private final TargetContextResolver<QueryMessage<?, ?>> targetContextResolver = spy(new TestTargetContextResolver<>());
 
     private AxonServerQueryBus testSubject;
+    private AxonServerConnection mockConnection;
+    private QueryChannel mockQueryChannel;
 
-    @Before
-    public void setup() throws Exception {
-        dummyMessagePlatformServer = new DummyMessagePlatformServer(4343);
-        dummyMessagePlatformServer.start();
-
-        configuration = new AxonServerConfiguration();
-        configuration.setServers("localhost:4343");
-        configuration.setClientId("JUnit");
-        configuration.setComponentName("JUnit");
-        configuration.setInitialNrOfPermits(100);
-        configuration.setNewPermitsThreshold(10);
-        configuration.setNrOfNewPermits(1000);
-        configuration.setContext(BOUNDED_CONTEXT);
-        axonServerConnectionManager = spy(AxonServerConnectionManager.builder()
-                                                                     .axonServerConfiguration(configuration)
-                                                                     .build());
+    @BeforeEach
+    void setup() throws Exception {
+        AxonServerConfiguration configuration = new AxonServerConfiguration();
+        configuration.setContext(CONTEXT);
+        axonServerConnectionManager = mock(AxonServerConnectionManager.class);
 
         testSubject = AxonServerQueryBus.builder()
                                         .axonServerConnectionManager(axonServerConnectionManager)
                                         .configuration(configuration)
                                         .localSegment(localSegment)
-                                        .updateEmitter(localSegment.queryUpdateEmitter())
+                                        .updateEmitter(SimpleQueryUpdateEmitter.builder().build())
                                         .messageSerializer(serializer)
                                         .genericSerializer(serializer)
                                         .targetContextResolver(targetContextResolver)
                                         .build();
+
+        mockConnection = mock(AxonServerConnection.class);
+        mockQueryChannel = mock(QueryChannel.class);
+
+        when(axonServerConnectionManager.getConnection(anyString())).thenReturn(mockConnection);
+        when(axonServerConnectionManager.getConnection()).thenReturn(mockConnection);
+
+        when(mockConnection.queryChannel()).thenReturn(mockQueryChannel);
+        when(mockQueryChannel.registerQueryHandler(any(), any())).thenReturn(() -> CompletableFuture.completedFuture(null));
+
+        when(localSegment.subscribe(any(), any(), any())).thenReturn(() -> true);
+
     }
 
-    @After
-    public void tearDown() {
-        dummyMessagePlatformServer.stop();
+    @AfterEach
+    void tearDown() {
         axonServerConnectionManager.shutdown();
         testSubject.disconnect();
     }
 
     @Test
-    public void subscribe() throws Exception {
-        Registration result = testSubject.subscribe("testQuery", String.class, q -> "test");
+    void subscribe() {
+        Registration result = testSubject.subscribe(TEST_QUERY, String.class, q -> "test");
 
-        Thread.sleep(1000);
-        assertWithin(
-                1000,
-                TimeUnit.MILLISECONDS,
-                () -> assertNotNull(dummyMessagePlatformServer.subscriptions("testQuery", String.class.getName()))
-        );
-
-        result.cancel();
-        assertWithin(
-                2000,
-                TimeUnit.MILLISECONDS,
-                () -> assertNull(dummyMessagePlatformServer.subscriptions("testQuery", String.class.getName()))
-        );
-
-        //noinspection unchecked
-        verify(axonServerConnectionManager).getQueryStream(eq(BOUNDED_CONTEXT), any(StreamObserver.class));
+        assertNotNull(result);
+        verify(axonServerConnectionManager).getConnection(CONTEXT);
+        verify(mockQueryChannel).registerQueryHandler(any(), eq(new QueryDefinition(TEST_QUERY, String.class)));
     }
 
     @Test
-    public void query() throws Exception {
+    void query() throws Exception {
+        when(mockQueryChannel.query(any())).thenReturn(new StubResultStream(stubResponse("<string>test</string>")));
         QueryMessage<String, String> testQuery = new GenericQueryMessage<>("Hello, World", instanceOf(String.class));
 
         assertEquals("test", testSubject.query(testQuery).get().getPayload());
@@ -146,46 +151,28 @@ public class AxonServerQueryBusTest {
     }
 
     @Test
-    public void queryWhenQueryServiceStubFails() {
-        AxonServerConnectionManager axonServerConnectionManager =
-                AxonServerConnectionManager.builder()
-                                           .axonServerConfiguration(configuration)
-                                           .build();
-        AxonServerQueryBus testSubject = spy(AxonServerQueryBus.builder()
-                                                               .axonServerConnectionManager(axonServerConnectionManager)
-                                                               .configuration(configuration)
-                                                               .localSegment(localSegment)
-                                                               .updateEmitter(localSegment.queryUpdateEmitter())
-                                                               .messageSerializer(serializer)
-                                                               .genericSerializer(serializer)
-                                                               .targetContextResolver(targetContextResolver)
-                                                               .build());
-        RuntimeException expectedException = new RuntimeException("oops");
-        when(testSubject.queryService(anyString())).thenThrow(expectedException);
-
+    void queryReportsDispatchException() throws Exception {
+        StubResultStream t = new StubResultStream(new RuntimeException("Faking problems"));
+        when(mockQueryChannel.query(any())).thenReturn(t);
         QueryMessage<String, String> testQuery = new GenericQueryMessage<>("Hello, World", instanceOf(String.class));
 
         CompletableFuture<QueryResponseMessage<String>> result = testSubject.query(testQuery);
-
-        assertTrue(result.isDone());
-        assertTrue(result.isCompletedExceptionally());
-        verify(targetContextResolver).resolveContext(testQuery);
-
         try {
             result.get();
-            fail("Expected an exception here");
-        } catch (Exception actual) {
-            assertTrue(actual.getCause() instanceof AxonServerQueryDispatchException);
-            AxonServerQueryDispatchException queryDispatchException = (AxonServerQueryDispatchException) actual
-                    .getCause();
-            assertEquals(ErrorCode.QUERY_DISPATCH_ERROR.errorCode(), queryDispatchException.code());
+            fail("Expected exception");
+        } catch (ExecutionException e) {
+            assertTrue(e.getCause() instanceof AxonServerQueryDispatchException);
+            assertEquals("Faking problems", e.getCause().getMessage());
         }
+
+        verify(targetContextResolver).resolveContext(testQuery);
     }
 
     @Test
-    public void testQueryReportsCorrectException() throws ExecutionException, InterruptedException {
-        QueryMessage<String, String> testQuery = new GenericQueryMessage<>("Hello, World", instanceOf(String.class))
-                .andMetaData(Collections.singletonMap("errorCode", ErrorCode.QUERY_EXECUTION_ERROR.errorCode()));
+    void testQueryReportsCorrectException() throws ExecutionException, InterruptedException {
+        when(mockQueryChannel.query(any())).thenReturn(new StubResultStream(stubErrorResponse(ErrorCode.QUERY_EXECUTION_ERROR.errorCode(),
+                                                                                              "Faking exception result")));
+        QueryMessage<String, String> testQuery = new GenericQueryMessage<>("Hello, World", instanceOf(String.class));
 
         CompletableFuture<QueryResponseMessage<String>> result = testSubject.query(testQuery);
 
@@ -203,136 +190,58 @@ public class AxonServerQueryBusTest {
     }
 
     @Test
-    public void processQuery() {
-        AxonServerQueryBus testSubject = AxonServerQueryBus.builder()
-                                                           .axonServerConnectionManager(axonServerConnectionManager)
-                                                           .configuration(configuration)
-                                                           .localSegment(localSegment)
-                                                           .updateEmitter(localSegment.queryUpdateEmitter())
-                                                           .messageSerializer(serializer)
-                                                           .genericSerializer(serializer)
-                                                           .targetContextResolver(targetContextResolver)
-                                                           .requestStreamFactory(so -> new TestStreamObserver<>())
-                                                           .build();
+    void subscribeHandler() {
 
-        AtomicReference<StreamObserver<QueryProviderInbound>> inboundStreamObserver =
-                buildInboundQueryStreamObserverReference();
+        when(mockQueryChannel.registerQueryHandler(any(), any())).thenReturn(() -> CompletableFuture.completedFuture(null));
 
-        Registration result = testSubject.subscribe("testQuery", String.class, q -> "test: " + q.getPayloadType());
+        Registration result = testSubject.subscribe(TEST_QUERY, String.class, q -> "test: " + q.getPayloadType());
 
-        QueryProviderInbound inboundMessage = testQueryMessage();
-        inboundStreamObserver.get().onNext(inboundMessage);
+        assertNotNull(result);
+        verify(mockQueryChannel).registerQueryHandler(any(), eq(new QueryDefinition(TEST_QUERY, String.class)));
+    }
+
+    @Test
+    void unsubscribeHandler() {
+        io.axoniq.axonserver.connector.Registration registration = mock(io.axoniq.axonserver.connector.Registration.class);
+        when(mockQueryChannel.registerQueryHandler(any(), any())).thenReturn(registration);
+
+        Registration result = testSubject.subscribe(TEST_QUERY, String.class, q -> "test: " + q.getPayloadType());
+        assertNotNull(result);
+        verify(mockQueryChannel).registerQueryHandler(any(), eq(new QueryDefinition(TEST_QUERY, String.class)));
 
         result.close();
+        verify(registration).cancel();
     }
 
     @Test
-    public void unsupportedQueryInstruction() {
-        TestStreamObserver<QueryProviderOutbound> requestStream = new TestStreamObserver<>();
-        AxonServerQueryBus testSubject = AxonServerQueryBus.builder()
-                                                           .axonServerConnectionManager(axonServerConnectionManager)
-                                                           .configuration(configuration)
-                                                           .localSegment(localSegment)
-                                                           .updateEmitter(localSegment.queryUpdateEmitter())
-                                                           .messageSerializer(serializer)
-                                                           .genericSerializer(serializer)
-                                                           .targetContextResolver(targetContextResolver)
-                                                           .requestStreamFactory(so -> requestStream)
-                                                           .build();
+    void scatterGather() {
+        QueryMessage<String, String> testQuery = new GenericQueryMessage<>("Hello, World", instanceOf(String.class));
 
-        AtomicReference<StreamObserver<QueryProviderInbound>> inboundStreamObserver =
-                buildInboundQueryStreamObserverReference();
+        when(mockQueryChannel.query(any())).thenReturn(new StubResultStream(stubResponse("<string>1</string>"),
+                                                                            stubResponse("<string>2</string>"),
+                                                                            stubResponse("<string>3</string>")));
 
-        Registration result = testSubject.subscribe("testQuery", String.class, q -> "test: " + q.getPayloadType());
-
-        String instructionId = "instructionId";
-        QueryProviderInbound inboundMessage = QueryProviderInbound.newBuilder()
-                                                                  .setInstructionId(instructionId)
-                                                                  .build();
-        inboundStreamObserver.get().onNext(inboundMessage);
-
-        result.close();
-
-        assertTrue(requestStream.sentMessages()
-                                .stream()
-                                .anyMatch(outbound -> outbound.getRequestCase()
-                                                              .equals(QueryProviderOutbound.RequestCase.ACK)
-                                        && !outbound.getAck().getSuccess()
-                                        && outbound.getAck().getError().getErrorCode()
-                                                   .equals(UNSUPPORTED_INSTRUCTION.errorCode())
-                                        && outbound.getAck().getInstructionId().equals(instructionId)));
-    }
-
-    @Test
-    public void unsupportedQueryInstructionWithoutInstructionId() {
-        TestStreamObserver<QueryProviderOutbound> requestStream = new TestStreamObserver<>();
-        AxonServerQueryBus testSubject = AxonServerQueryBus.builder()
-                                                           .axonServerConnectionManager(axonServerConnectionManager)
-                                                           .configuration(configuration)
-                                                           .localSegment(localSegment)
-                                                           .updateEmitter(localSegment.queryUpdateEmitter())
-                                                           .messageSerializer(serializer)
-                                                           .genericSerializer(serializer)
-                                                           .targetContextResolver(targetContextResolver)
-                                                           .requestStreamFactory(so -> requestStream)
-                                                           .build();
-
-        AtomicReference<StreamObserver<QueryProviderInbound>> inboundStreamObserver =
-                buildInboundQueryStreamObserverReference();
-
-        Registration result = testSubject.subscribe("testQuery", String.class, q -> "test: " + q.getPayloadType());
-
-        QueryProviderInbound inboundMessage = QueryProviderInbound.newBuilder().build();
-        inboundStreamObserver.get().onNext(inboundMessage);
-
-        result.close();
-
-        assertEquals(0, requestStream.sentMessages().size());
-    }
-
-    @Test
-    public void scatterGather() {
-        QueryMessage<String, String> testQuery = new GenericQueryMessage<>("Hello, World", instanceOf(String.class))
-                .andMetaData(MetaData.with("repeat", 10).and("interval", 10));
-
-        assertEquals(10, testSubject.scatterGather(testQuery, 12, TimeUnit.SECONDS).count());
+        assertEquals(3, testSubject.scatterGather(testQuery, 12, TimeUnit.SECONDS).count());
 
         verify(targetContextResolver).resolveContext(testQuery);
+        verify(mockQueryChannel).query(argThat(
+                r -> r.getPayload().getData().toStringUtf8().equals("<string>Hello, World</string>")
+                        && -1 == ProcessingInstructionHelper.numberOfResults(r.getProcessingInstructionsList())));
     }
 
     @Test
-    public void scatterGatherTimeout() {
-        QueryMessage<String, String> testQuery = new GenericQueryMessage<>("Hello, World", instanceOf(String.class))
-                .andMetaData(MetaData.with("repeat", 10).and("interval", 100));
+    void queryForOptionalWillRequestInstanceOfFromRemoteDestination() {
+        QueryMessage<String, Optional<String>> testQuery =
+                new GenericQueryMessage<>("Hello, World", optionalInstanceOf(String.class));
 
-        assertTrue(8 > testSubject.scatterGather(testQuery, 550, TimeUnit.MILLISECONDS).count());
+        testSubject.scatterGather(testQuery, 12, TimeUnit.SECONDS);
 
         verify(targetContextResolver).resolveContext(testQuery);
+        verify(mockQueryChannel).query(argThat(r -> r.getResponseType().getType().equals(InstanceResponseType.class.getName())));
     }
 
     @Test
-    public void testSubscriptionQueryIsHandledByDispatchInterceptors() {
-        AtomicInteger counter = new AtomicInteger(0);
-
-        // Add a dispatch interceptor which increase the counter, to check whether it was called during a sub.query
-        testSubject.registerDispatchInterceptor(messages -> {
-            counter.incrementAndGet();
-            return (i, m) -> m;
-        });
-
-        SubscriptionQueryMessage<String, String, String> testQuery = new GenericSubscriptionQueryMessage<>(
-                "query-payload", instanceOf(String.class), instanceOf(String.class)
-        );
-
-        testSubject.subscriptionQuery(testQuery);
-
-        assertEquals(1, counter.get());
-
-        verify(targetContextResolver).resolveContext(testQuery);
-    }
-
-    @Test
-    public void dispatchInterceptor() {
+    void dispatchInterceptor() {
         List<Object> results = new LinkedList<>();
         testSubject.registerDispatchInterceptor(messages -> (a, b) -> {
             results.add(b.getPayload());
@@ -345,81 +254,145 @@ public class AxonServerQueryBusTest {
     }
 
     @Test
-    public void handlerInterceptor() {
-        AxonServerQueryBus testSubject = AxonServerQueryBus.builder()
-                                                           .axonServerConnectionManager(axonServerConnectionManager)
-                                                           .configuration(configuration)
-                                                           .localSegment(localSegment)
-                                                           .updateEmitter(localSegment.queryUpdateEmitter())
-                                                           .messageSerializer(serializer)
-                                                           .genericSerializer(serializer)
-                                                           .targetContextResolver(targetContextResolver)
-                                                           .build();
-        AtomicReference<StreamObserver<QueryProviderInbound>> inboundStreamObserver =
-                buildInboundQueryStreamObserverReference();
+    void handlerInterceptorRegisteredWithLocalSegment() {
 
-        testSubject.subscribe("testQuery", String.class, q -> "test: " + q.getPayloadType());
+        MessageHandlerInterceptor<QueryMessage<?, ?>> interceptor = (unitOfWork, interceptorChain) -> interceptorChain.proceed();
+        testSubject.registerHandlerInterceptor(interceptor);
 
-        List<Object> results = new LinkedList<>();
-        testSubject.registerHandlerInterceptor((unitOfWork, interceptorChain) -> {
-            results.add("Interceptor executed");
-            return interceptorChain.proceed();
-        });
-
-        QueryProviderInbound inboundMessage = testQueryMessage();
-        inboundStreamObserver.get().onNext(inboundMessage);
-        assertWithin(1, TimeUnit.SECONDS, () -> assertEquals(1, results.size()));
-        assertWithin(1, TimeUnit.SECONDS, () -> assertEquals("Interceptor executed", results.get(0)));
+        verify(localSegment).registerHandlerInterceptor(interceptor);
     }
 
     @Test
-    public void reconnectAfterConnectionLost() throws InterruptedException {
-        testSubject.subscribe("testQuery", String.class, q -> "test");
-
-        Thread.sleep(50);
-        assertNotNull(dummyMessagePlatformServer.subscriptions("testQuery", String.class.getName()));
-
-        dummyMessagePlatformServer.onError("testQuery", String.class.getName());
-        Thread.sleep(200);
-        assertNotNull(dummyMessagePlatformServer.subscriptions("testQuery", String.class.getName()));
-
-        //noinspection unchecked
-        verify(axonServerConnectionManager, times(2)).getQueryStream(eq(BOUNDED_CONTEXT), any(StreamObserver.class));
+    void testLocalSegmentReturnsLocalQueryBus() {
+        assertEquals(localSegment, testSubject.localSegment());
     }
 
-    private QueryProviderInbound testQueryMessage() {
-        org.axonframework.serialization.SerializedObject<byte[]> serializedResponseType =
-                serializer.serialize(instanceOf(String.class), byte[].class);
+    @Test
+    void testAfterShutdownDispatchingAnShutdownInProgressExceptionOnQueryInvocation() {
+        QueryMessage<String, String> testQuery = new GenericQueryMessage<>("some-query", instanceOf(String.class));
 
-        SerializedObject testResponseType =
-                SerializedObject.newBuilder()
-                                .setData(ByteString.copyFrom(serializedResponseType.getData()))
-                                .setType(serializedResponseType.getType().getName())
-                                .setRevision(getOrDefault(serializedResponseType.getType().getRevision(), ""))
-                                .build();
-        SerializedObject testQueryPayload = SerializedObject.newBuilder()
-                                                            .setData(ByteString.copyFromUtf8("<string>Hello</string>"))
-                                                            .setType(String.class.getName())
-                                                            .build();
-        return QueryProviderInbound.newBuilder()
-                                   .setInstructionId("instructionId")
-                                   .setQuery(QueryRequest.newBuilder()
-                                                         .setQuery("testQuery")
-                                                         .setResponseType(testResponseType)
-                                                         .setPayload(testQueryPayload)
-                                   ).build();
+        testSubject.shutdownDispatching();
+
+        assertWithin(
+                50, TimeUnit.MILLISECONDS,
+                () -> assertThrows(ShutdownInProgressException.class, () -> testSubject.query(testQuery))
+        );
     }
 
+    @Test
+    void testAfterShutdownDispatchingAnShutdownInProgressExceptionOnScatterGatherInvocation() {
+        QueryMessage<String, String> testQuery = new GenericQueryMessage<>("some-query", instanceOf(String.class));
 
-    private AtomicReference<StreamObserver<QueryProviderInbound>> buildInboundQueryStreamObserverReference() {
-        AtomicReference<StreamObserver<QueryProviderInbound>> inboundStreamObserver = new AtomicReference<>();
+        testSubject.shutdownDispatching();
 
-        doAnswer(invocationOnMock -> {
-            inboundStreamObserver.set(invocationOnMock.getArgument(1));
-            return new TestStreamObserver<QueryProviderOutbound>();
-        }).when(axonServerConnectionManager)
-          .getQueryStream(any(), any());
+        assertWithin(
+                50, TimeUnit.MILLISECONDS,
+                () -> assertThrows(
+                        ShutdownInProgressException.class,
+                        () -> testSubject.scatterGather(testQuery, 1, TimeUnit.SECONDS)
+                )
+        );
+    }
 
-        return inboundStreamObserver;
+    @Test
+    void testAfterShutdownDispatchingAnShutdownInProgressExceptionOnSubscriptionQueryInvocation() {
+        SubscriptionQueryMessage<String, String, String> testSubscriptionQuery =
+                new GenericSubscriptionQueryMessage<>("some-query", instanceOf(String.class), instanceOf(String.class));
+
+        testSubject.shutdownDispatching();
+
+        assertThrows(ShutdownInProgressException.class,
+                     () -> testSubject.subscriptionQuery(testSubscriptionQuery));
+    }
+
+    private QueryResponse stubResponse(String payload) {
+        return QueryResponse.newBuilder()
+                            .setRequestIdentifier("request")
+                            .setMessageIdentifier(UUID.randomUUID().toString())
+                            .setPayload(SerializedObject.newBuilder()
+                                                        .setData(ByteString.copyFromUtf8(payload))
+                                                        .setType(String.class.getName()))
+                            .build();
+    }
+
+    private QueryResponse stubErrorResponse(String errorCode, String message) {
+        return QueryResponse.newBuilder()
+                            .setRequestIdentifier("request")
+                            .setMessageIdentifier(UUID.randomUUID().toString())
+                            .setErrorCode(errorCode)
+                            .setErrorMessage(ErrorMessage.newBuilder()
+                                                         .setMessage(message)
+                                                         .setLocation("test")
+                                                         .build())
+                            .build();
+    }
+
+    private static class StubResultStream implements ResultStream<QueryResponse> {
+
+        private final Iterator<QueryResponse> responses;
+        private QueryResponse peeked;
+        private boolean closed;
+        private final Throwable error;
+
+        public StubResultStream(Throwable error) {
+            this.error = error;
+            this.closed = true;
+            this.responses = Collections.emptyIterator();
+        }
+
+        public StubResultStream(QueryResponse... responses) {
+            this.error = null;
+            this.responses = Arrays.asList(responses).iterator();
+        }
+
+        @Override
+        public QueryResponse peek() {
+            if (peeked == null && responses.hasNext()) {
+                peeked = responses.next();
+            }
+            return peeked;
+        }
+
+        @Override
+        public QueryResponse nextIfAvailable() {
+            if (peeked != null) {
+                QueryResponse result = peeked;
+                peeked = null;
+                return result;
+            }
+            return responses.hasNext() ? responses.next() : null;
+        }
+
+        @Override
+        public QueryResponse nextIfAvailable(long timeout, TimeUnit unit) {
+            return nextIfAvailable();
+        }
+
+        @Override
+        public QueryResponse next() {
+            return nextIfAvailable();
+        }
+
+        @Override
+        public void onAvailable(Runnable r) {
+            if (peeked != null || responses.hasNext() || isClosed()) {
+                r.run();
+            }
+        }
+
+        @Override
+        public void close() {
+            closed = true;
+        }
+
+        @Override
+        public boolean isClosed() {
+            return closed;
+        }
+
+        @Override
+        public Optional<Throwable> getError() {
+            return Optional.ofNullable(error);
+        }
     }
 }

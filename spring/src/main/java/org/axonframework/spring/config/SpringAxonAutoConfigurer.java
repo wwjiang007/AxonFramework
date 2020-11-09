@@ -1,11 +1,11 @@
 /*
- * Copyright (c) 2010-2019. Axon Framework
+ * Copyright (c) 2010-2020. Axon Framework
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *     http://www.apache.org/licenses/LICENSE-2.0
+ *    http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -19,16 +19,27 @@ package org.axonframework.spring.config;
 import org.axonframework.commandhandling.CommandBus;
 import org.axonframework.common.AxonConfigurationException;
 import org.axonframework.common.annotation.AnnotationUtils;
+import org.axonframework.common.caching.Cache;
 import org.axonframework.common.jpa.EntityManagerProvider;
 import org.axonframework.common.lock.LockFactory;
 import org.axonframework.common.lock.NullLockFactory;
 import org.axonframework.common.transaction.TransactionManager;
-import org.axonframework.config.*;
+import org.axonframework.config.AggregateConfigurer;
+import org.axonframework.config.Configuration;
+import org.axonframework.config.Configurer;
+import org.axonframework.config.DefaultConfigurer;
+import org.axonframework.config.EventProcessingConfiguration;
+import org.axonframework.config.EventProcessingConfigurer;
+import org.axonframework.config.EventProcessingModule;
+import org.axonframework.config.ModuleConfiguration;
+import org.axonframework.config.ProcessingGroup;
+import org.axonframework.config.TagsConfiguration;
 import org.axonframework.deadline.DeadlineManager;
 import org.axonframework.eventhandling.ErrorHandler;
 import org.axonframework.eventhandling.EventBus;
 import org.axonframework.eventhandling.EventMessage;
 import org.axonframework.eventhandling.ListenerInvocationErrorHandler;
+import org.axonframework.eventhandling.scheduling.EventScheduler;
 import org.axonframework.eventhandling.tokenstore.TokenStore;
 import org.axonframework.eventsourcing.AggregateFactory;
 import org.axonframework.eventsourcing.SnapshotTriggerDefinition;
@@ -71,14 +82,19 @@ import org.springframework.core.type.AnnotationMetadata;
 import org.springframework.transaction.PlatformTransactionManager;
 
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.function.Consumer;
+import java.util.function.Function;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 import java.util.stream.StreamSupport;
 
+import static java.lang.String.format;
 import static org.axonframework.common.ReflectionUtils.methodsOf;
 import static org.axonframework.common.annotation.AnnotationUtils.findAnnotationAttributes;
 import static org.axonframework.spring.SpringUtils.isQualifierMatch;
@@ -123,6 +139,9 @@ public class SpringAxonAutoConfigurer implements ImportBeanDefinitionRegistrar, 
     public static final String AXON_CONFIGURER_BEAN = "org.axonframework.config.Configurer";
 
     private static final Logger logger = LoggerFactory.getLogger(SpringAxonAutoConfigurer.class);
+
+    private static final String EMPTY_STRING = "";
+
     private ConfigurableListableBeanFactory beanFactory;
 
     @Override
@@ -145,50 +164,36 @@ public class SpringAxonAutoConfigurer implements ImportBeanDefinitionRegistrar, 
         configurer.registerHandlerDefinition((c, clazz) -> beanFactory
                 .getBean(handlerDefinition.getBeanName(), HandlerDefinition.class));
 
-        findComponent(CommandBus.class)
-                .ifPresent(commandBus -> configurer.configureCommandBus(c -> getBean(commandBus, c)));
-        findComponent(QueryBus.class)
-                .ifPresent(queryBus -> configurer.configureQueryBus(c -> getBean(queryBus, c)));
-        findComponent(QueryUpdateEmitter.class)
-                .ifPresent(queryUpdateEmitter -> configurer.configureQueryUpdateEmitter(c -> getBean(queryUpdateEmitter, c)));
-        findComponent(EventStorageEngine.class)
-                .ifPresent(ese -> configurer.configureEmbeddedEventStore(c -> getBean(ese, c)));
-        findComponent(EventBus.class).ifPresent(eventBus -> configurer.configureEventBus(c -> getBean(eventBus, c)));
-        findComponent(Serializer.class)
-                .ifPresent(serializer -> configurer.configureSerializer(c -> getBean(serializer, c)));
-        findComponent(Serializer.class, "eventSerializer")
-                .ifPresent(eventSerializer -> configurer.configureEventSerializer(c -> getBean(eventSerializer, c)));
-        findComponent(Serializer.class, "messageSerializer").ifPresent(
-                messageSerializer -> configurer.configureMessageSerializer(c -> getBean(messageSerializer, c)));
-        findComponent(TokenStore.class)
-                .ifPresent(tokenStore -> configurer.registerComponent(TokenStore.class, c -> getBean(tokenStore, c)));
+        registerComponent(CommandBus.class, configurer::configureCommandBus, configurer, Configuration::commandBus);
+        registerComponent(QueryBus.class, configurer::configureQueryBus, configurer, Configuration::queryBus);
+        registerComponent(QueryUpdateEmitter.class, configurer::configureQueryUpdateEmitter);
+        registerComponent(
+                EventStorageEngine.class, configurer::configureEmbeddedEventStore, configurer, Configuration::eventBus
+        );
+        registerComponent(EventBus.class, configurer::configureEventBus);
+        registerComponent(Serializer.class, configurer::configureSerializer);
+        registerComponent(Serializer.class, "eventSerializer", configurer::configureEventSerializer);
+        registerComponent(Serializer.class, "messageSerializer", configurer::configureMessageSerializer);
+        registerComponent(TokenStore.class, configurer);
         try {
             findComponent(PlatformTransactionManager.class).ifPresent(
-                    ptm -> configurer.configureTransactionManager(c -> new SpringTransactionManager(getBean(ptm, c))));
+                    ptm -> configurer.configureTransactionManager(c -> new SpringTransactionManager(getBean(ptm, c)))
+            );
         } catch (NoClassDefFoundError error) {
             // that's fine...
         }
-        findComponent(TransactionManager.class)
-                .ifPresent(tm -> configurer.configureTransactionManager(c -> getBean(tm, c)));
-        findComponent(SagaStore.class)
-                .ifPresent(sagaStore -> configurer.registerComponent(SagaStore.class, c -> getBean(sagaStore, c)));
-        findComponent(ListenerInvocationErrorHandler.class).ifPresent(
-                handler -> configurer.registerComponent(ListenerInvocationErrorHandler.class, c -> getBean(handler, c))
+        registerComponent(TransactionManager.class, configurer::configureTransactionManager);
+        registerComponent(SagaStore.class, configurer);
+        registerComponent(ListenerInvocationErrorHandler.class, configurer);
+        registerComponent(ErrorHandler.class, configurer);
+        registerComponent(TagsConfiguration.class, configurer);
+        String resourceInjector = findComponent(
+                ResourceInjector.class, registry,
+                () -> genericBeanDefinition(SpringResourceInjector.class).getBeanDefinition()
         );
-        findComponent(ErrorHandler.class).ifPresent(
-                handler -> configurer.registerComponent(ErrorHandler.class, c -> getBean(handler, c))
-        );
-        findComponent(TagsConfiguration.class).ifPresent(
-                tagsConfiguration -> configurer.configureTags(c -> getBean(tagsConfiguration, c))
-        );
-
-        String resourceInjector = findComponent(ResourceInjector.class, registry,
-                                                () -> genericBeanDefinition(SpringResourceInjector.class)
-                                                        .getBeanDefinition());
         configurer.configureResourceInjector(c -> getBean(resourceInjector, c));
-
-        findComponent(DeadlineManager.class).ifPresent(deadlineManager -> configurer
-                .registerComponent(DeadlineManager.class, c -> getBean(deadlineManager, c)));
+        registerComponent(EventScheduler.class, configurer, Configuration::eventScheduler);
+        registerComponent(DeadlineManager.class, configurer, Configuration::deadlineManager);
 
         EventProcessingModule eventProcessingModule = new EventProcessingModule();
         Optional<String> eventProcessingConfigurerOptional = findComponent(EventProcessingConfigurer.class);
@@ -290,18 +295,64 @@ public class SpringAxonAutoConfigurer implements ImportBeanDefinitionRegistrar, 
         String[] sagas = beanFactory.getBeanNamesForAnnotation(Saga.class);
         for (String saga : sagas) {
             Saga sagaAnnotation = beanFactory.findAnnotationOnBean(saga, Saga.class);
-            Class sagaType = beanFactory.getType(saga);
+            Class<?> sagaType = beanFactory.getType(saga);
             ProcessingGroup processingGroupAnnotation =
                     beanFactory.findAnnotationOnBean(saga, ProcessingGroup.class);
-            if (processingGroupAnnotation != null && !"".equals(processingGroupAnnotation.value())) {
+            if (processingGroupAnnotation != null && nonEmptyBeanName(processingGroupAnnotation.value())) {
                 configurer.assignHandlerTypesMatching(processingGroupAnnotation.value(), sagaType::equals);
             }
             configurer.registerSaga(sagaType, sagaConfigurer -> {
-                if (sagaAnnotation != null && !"".equals(sagaAnnotation.sagaStore())) {
+                if (sagaAnnotation != null && nonEmptyBeanName(sagaAnnotation.sagaStore())) {
                     sagaConfigurer.configureSagaStore(c -> beanFactory.getBean(sagaAnnotation.sagaStore(), SagaStore.class));
                 }
             });
         }
+    }
+
+    @SuppressWarnings("unchecked")
+    private <A> Map<SpringAggregate<? super A>, Map<Class<? extends A>, String>> buildAggregateHierarchy(
+            String[] aggregatePrototypes) {
+        Map<SpringAggregate<? super A>, Map<Class<? extends A>, String>> hierarchy = new HashMap<>();
+        for (String prototype : aggregatePrototypes) {
+            Class<A> aggregateType = (Class<A>) beanFactory.getType(prototype);
+            SpringAggregate<A> springAggregate = new SpringAggregate<>(prototype, aggregateType);
+            Class<? super A> topType = topAnnotatedAggregateType(aggregateType);
+            SpringAggregate<? super A> topSpringAggregate = new SpringAggregate<>(beanName(topType), topType);
+            hierarchy.compute(topSpringAggregate, (type, subtypes) -> {
+                if (subtypes == null) {
+                    subtypes = new HashMap<>();
+                }
+                if (!type.equals(springAggregate)) {
+                    subtypes.put(aggregateType, prototype);
+                }
+                return subtypes;
+            });
+        }
+        return hierarchy;
+    }
+
+    private <A> String beanName(Class<A> type) {
+        String[] beanNamesForType = beanFactory.getBeanNamesForType(type);
+        if (beanNamesForType.length == 0) {
+            throw new AxonConfigurationException(format("There are no spring beans for '%s' defined.", type.getName()));
+        } else {
+            if (beanNamesForType.length != 1) {
+                logger.warn("There are {} beans defined for '{}'.", beanNamesForType.length, type.getName());
+            }
+            return beanNamesForType[0];
+        }
+    }
+
+    private <A> Class<? super A> topAnnotatedAggregateType(Class<A> type) {
+        Class<? super A> top = type;
+        Class<? super A> topAnnotated = top;
+        while(!top.getSuperclass().equals(Object.class)) {
+            top = top.getSuperclass();
+            if (top.isAnnotationPresent(Aggregate.class)) {
+                topAnnotated = top;
+            }
+        }
+        return topAnnotated;
     }
 
     /**
@@ -310,69 +361,100 @@ public class SpringAxonAutoConfigurer implements ImportBeanDefinitionRegistrar, 
     @SuppressWarnings("unchecked")
     private <A> void registerAggregateBeanDefinitions(Configurer configurer, BeanDefinitionRegistry registry) {
         String[] aggregates = beanFactory.getBeanNamesForAnnotation(Aggregate.class);
-        for (String aggregate : aggregates) {
-            Aggregate aggregateAnnotation = beanFactory.findAnnotationOnBean(aggregate, Aggregate.class);
-            Class<A> aggregateType = (Class<A>) beanFactory.getType(aggregate);
-            AggregateConfigurer<A> aggregateConf = AggregateConfigurer.defaultConfiguration(aggregateType);
-            if ("".equals(aggregateAnnotation.repository())) {
+        Map<SpringAggregate<? super A>, Map<Class<? extends A>, String>> hierarchy = buildAggregateHierarchy(aggregates);
+        for (Map.Entry<SpringAggregate<? super A>, Map<Class<? extends A>, String>> aggregate : hierarchy.entrySet()) {
+            Class<A> aggregateType = (Class<A>) aggregate.getKey().getClassType();
+            String aggregatePrototype = aggregate.getKey().getBeanName();
+            Aggregate aggregateAnnotation = aggregateType.getAnnotation(Aggregate.class);
+            AggregateConfigurer<A> aggregateConfigurer = AggregateConfigurer.defaultConfiguration(aggregateType);
+            aggregateConfigurer.withSubtypes(aggregate.getValue().keySet());
+
+            if (EMPTY_STRING.equals(aggregateAnnotation.repository())) {
                 String repositoryName = lcFirst(aggregateType.getSimpleName()) + "Repository";
                 String factoryName =
-                        aggregate.substring(0, 1).toLowerCase() + aggregate.substring(1) + "AggregateFactory";
+                        aggregatePrototype.substring(0, 1).toLowerCase()
+                                + aggregatePrototype.substring(1) + "AggregateFactory";
                 if (beanFactory.containsBean(repositoryName)) {
-                    aggregateConf.configureRepository(c -> beanFactory.getBean(repositoryName, Repository.class));
+                    aggregateConfigurer.configureRepository(c -> beanFactory.getBean(repositoryName, Repository.class));
                 } else {
                     registry.registerBeanDefinition(repositoryName,
                                                     genericBeanDefinition(RepositoryFactoryBean.class)
-                                                            .addConstructorArgValue(aggregateConf)
+                                                            .addConstructorArgValue(aggregateConfigurer)
                                                             .getBeanDefinition());
 
                     if (!registry.isBeanNameInUse(factoryName)) {
                         registry.registerBeanDefinition(factoryName,
                                                         genericBeanDefinition(SpringPrototypeAggregateFactory.class)
-                                                                .addConstructorArgValue(aggregate)
+                                                                .addConstructorArgValue(aggregatePrototype)
+                                                                .addConstructorArgValue(aggregate.getValue())
                                                                 .getBeanDefinition());
                     }
-                    aggregateConf
-                            .configureAggregateFactory(c -> beanFactory.getBean(factoryName, AggregateFactory.class));
-                    String triggerDefinition = aggregateAnnotation.snapshotTriggerDefinition();
-                    if (!"".equals(triggerDefinition)) {
-                        aggregateConf.configureSnapshotTrigger(
-                                c -> beanFactory.getBean(triggerDefinition, SnapshotTriggerDefinition.class));
+                    aggregateConfigurer.configureAggregateFactory(
+                            c -> beanFactory.getBean(factoryName, AggregateFactory.class)
+                    );
+
+                    String triggerDefinitionBeanName = aggregateAnnotation.snapshotTriggerDefinition();
+                    if (nonEmptyBeanName(triggerDefinitionBeanName)) {
+                        aggregateConfigurer.configureSnapshotTrigger(
+                                c -> beanFactory.getBean(triggerDefinitionBeanName, SnapshotTriggerDefinition.class)
+                        );
                     }
+
+                    String cacheBeanName = aggregateAnnotation.cache();
+                    if (nonEmptyBeanName(cacheBeanName)) {
+                        aggregateConfigurer.configureCache(c -> beanFactory.getBean(cacheBeanName, Cache.class));
+                    }
+
                     if (AnnotationUtils.isAnnotationPresent(aggregateType, "javax.persistence.Entity")) {
-                        aggregateConf.configureRepository(
+                        aggregateConfigurer.configureRepository(
                                 c -> GenericJpaRepository.builder(aggregateType)
-                                        .parameterResolverFactory(c.parameterResolverFactory())
-                                        .handlerDefinition(c.handlerDefinition(aggregateType))
-                                        .lockFactory(c.getComponent(
-                                                LockFactory.class, () -> NullLockFactory.INSTANCE
-                                        ))
-                                        .entityManagerProvider(c.getComponent(
-                                                EntityManagerProvider.class,
-                                                () -> beanFactory.getBean(EntityManagerProvider.class)
-                                        ))
-                                        .eventBus(c.eventBus())
-                                        .repositoryProvider(c::repository)
-                                        .build());
+                                                         .parameterResolverFactory(c.parameterResolverFactory())
+                                                         .handlerDefinition(c.handlerDefinition(aggregateType))
+                                                         .lockFactory(c.getComponent(
+                                                                 LockFactory.class, () -> NullLockFactory.INSTANCE
+                                                         ))
+                                                         .entityManagerProvider(c.getComponent(
+                                                                 EntityManagerProvider.class,
+                                                                 () -> beanFactory.getBean(EntityManagerProvider.class)
+                                                         ))
+                                                         .eventBus(c.eventBus())
+                                                         .repositoryProvider(c::repository)
+                                                         .build()
+                        );
                     }
                 }
             } else {
-                aggregateConf.configureRepository(
-                        c -> beanFactory.getBean(aggregateAnnotation.repository(), Repository.class));
+                aggregateConfigurer.configureRepository(
+                        c -> beanFactory.getBean(aggregateAnnotation.repository(), Repository.class)
+                );
             }
 
-            aggregateConf.configureFilterEventsByType(c -> aggregateAnnotation.filterEventsByType());
+            String snapshotFilterBeanName = aggregateAnnotation.snapshotFilter();
+            if (nonEmptyBeanName(snapshotFilterBeanName)) {
+                aggregateConfigurer.configureSnapshotFilter(c -> getBean(snapshotFilterBeanName, c));
+            }
 
-            if (!"".equals(aggregateAnnotation.commandTargetResolver())) {
-                aggregateConf.configureCommandTargetResolver(c -> getBean(aggregateAnnotation.commandTargetResolver(),
-                                                                          c));
+            String commandTargetResolverBeanName = aggregateAnnotation.commandTargetResolver();
+            if (nonEmptyBeanName(commandTargetResolverBeanName)) {
+                aggregateConfigurer.configureCommandTargetResolver(
+                        c -> getBean(commandTargetResolverBeanName, c)
+                );
             } else {
-                findComponent(CommandTargetResolver.class).ifPresent(commandTargetResolver -> aggregateConf
-                        .configureCommandTargetResolver(c -> getBean(commandTargetResolver, c)));
+                findComponent(CommandTargetResolver.class).ifPresent(
+                        commandTargetResolver -> aggregateConfigurer.configureCommandTargetResolver(
+                                c -> getBean(commandTargetResolver, c)
+                        )
+                );
             }
 
-            configurer.configureAggregate(aggregateConf);
+            aggregateConfigurer.configureFilterEventsByType(c -> aggregateAnnotation.filterEventsByType());
+
+            configurer.configureAggregate(aggregateConfigurer);
         }
+    }
+
+    private boolean nonEmptyBeanName(String beanName) {
+        return !EMPTY_STRING.equals(beanName);
     }
 
     /**
@@ -385,7 +467,8 @@ public class SpringAxonAutoConfigurer implements ImportBeanDefinitionRegistrar, 
         return string.substring(0, 1).toLowerCase() + string.substring(1);
     }
 
-    private <T> String findComponent(Class<T> componentType, BeanDefinitionRegistry registry,
+    private <T> String findComponent(Class<T> componentType,
+                                     BeanDefinitionRegistry registry,
                                      Supplier<BeanDefinition> defaultBean) {
         return findComponent(componentType).orElseGet(() -> {
             BeanDefinition beanDefinition = defaultBean.get();
@@ -395,14 +478,106 @@ public class SpringAxonAutoConfigurer implements ImportBeanDefinitionRegistrar, 
         });
     }
 
+    /**
+     * Register a component of {@code componentType} with {@code componentQualifier} through the given {@code
+     * registrationFunction}. The component to register will be a bean retrieved from the {@link ApplicationContext}
+     * tied to the {@link Configuration}.
+     *
+     * @param componentType        the type of the component to register
+     * @param componentQualifier   the qualifier of the component to register
+     * @param registrationFunction the function to register the component to the {@link Configuration}
+     * @param <T>                  the type of the component
+     */
+    private <T> void registerComponent(Class<T> componentType,
+                                       String componentQualifier,
+                                       Consumer<Function<Configuration, T>> registrationFunction) {
+        findComponent(componentType, componentQualifier).ifPresent(
+                componentName -> registrationFunction.accept(config -> getBean(componentName, config))
+        );
+    }
+
     private <T> Optional<String> findComponent(Class<T> componentType, String componentQualifier) {
         return Stream.of(beanNamesForTypeIncludingAncestors( beanFactory, componentType ))
                      .filter(bean -> isQualifierMatch(bean, beanFactory, componentQualifier))
                      .findFirst();
     }
 
+    /**
+     * Register a component of {@code componentType} through the given {@code registrationFunction}. The component to
+     * register will be a bean retrieved from the {@link ApplicationContext} tied to the {@link Configuration}.
+     *
+     * @param componentType        the type of the component to register
+     * @param registrationFunction the function to register the component to the {@link Configuration}
+     * @param <T>                  the type of the component
+     */
+    private <T> void registerComponent(Class<T> componentType,
+                                       Consumer<Function<Configuration, T>> registrationFunction) {
+        findComponent(componentType).ifPresent(
+                componentName -> registrationFunction.accept(config -> getBean(componentName, config))
+        );
+    }
+
+    /**
+     * Register a component of {@code componentType} with the given {@code configurer} through {@link
+     * Configurer#registerComponent(Class, Function)}. The component to register will be a bean retrieved from the
+     * {@link ApplicationContext} tied to the {@link Configuration}.
+     *
+     * @param componentType the type of the component to register
+     * @param configurer    the {@link Configurer} used to register the component with
+     * @param <T>           the type of the component
+     */
+    private <T> void registerComponent(Class<T> componentType, Configurer configurer) {
+        registerComponent(componentType,
+                          builder -> configurer.registerComponent(componentType, builder),
+                          configurer,
+                          null);
+    }
+
+    /**
+     * Register a component of {@code componentType} with the given {@code configurer}. through {@link
+     * Configurer#registerComponent(Class, Function)}. The {@code initHandler} is used to initialize the component at
+     * the right point in time. The component to register will be a bean retrieved from the {@link ApplicationContext}
+     * tied to the {@link Configuration}.
+     *
+     * @param componentType the type of the component to register
+     * @param configurer    the {@link Configurer} used to register the component with
+     * @param initHandler   the function used to initialize the registered component
+     * @param <T>           the type of the component
+     */
+    private <T> void registerComponent(Class<T> componentType,
+                                       Configurer configurer,
+                                       Consumer<Configuration> initHandler) {
+        registerComponent(componentType,
+                          builder -> configurer.registerComponent(componentType, builder),
+                          configurer,
+                          initHandler);
+    }
+
+    /**
+     * Register a component of {@code componentType} through the given {@code registrationFunction}. The {@code
+     * initHandler} is used to initialize the component at the right point in time. The component to register will be a
+     * bean retrieved from the {@link ApplicationContext} tied to the {@link Configuration}.
+     *
+     * @param componentType        the type of the component to register
+     * @param registrationFunction the function to register the component to the {@link Configuration}
+     * @param configurer           the {@link Configurer} used to register the component with
+     * @param initHandler          the function used to initialize the registered component
+     * @param <T>                  the type of the component
+     */
+    private <T> void registerComponent(Class<T> componentType,
+                                       Consumer<Function<Configuration, T>> registrationFunction,
+                                       Configurer configurer,
+                                       Consumer<Configuration> initHandler) {
+        findComponent(componentType).ifPresent(componentName -> {
+            registrationFunction.accept(config -> getBean(componentName, config));
+            if (initHandler != null) {
+                configurer.onInitialize(c -> c.onStart(Integer.MIN_VALUE, () -> initHandler.accept(c)));
+            }
+        });
+    }
+
     private <T> Optional<String> findComponent(Class<T> componentType) {
-        String[] beans = beanNamesForTypeIncludingAncestors( beanFactory, componentType );
+        String[] beans = beanNamesForTypeIncludingAncestors(beanFactory, componentType);
         if (beans.length == 1) {
             return Optional.of(beans[0]);
         } else if (beans.length > 1) {
@@ -453,21 +628,6 @@ public class SpringAxonAutoConfigurer implements ImportBeanDefinitionRegistrar, 
         }
 
         @Override
-        public void start() {
-            getDelegate().start();
-        }
-
-        @Override
-        public void shutdown() {
-            getDelegate().shutdown();
-        }
-
-        @Override
-        public int phase() {
-            return getDelegate().phase();
-        }
-
-        @Override
         public ModuleConfiguration unwrap() {
             return getDelegate();
         }
@@ -482,6 +642,43 @@ public class SpringAxonAutoConfigurer implements ImportBeanDefinitionRegistrar, 
                 delegate = delegateSupplier.get();
             }
             return delegate;
+        }
+    }
+
+    private static class SpringAggregate<T> {
+
+        private final String beanName;
+        private final Class<T> classType;
+
+        private SpringAggregate(String beanName, Class<T> classType) {
+            this.beanName = beanName;
+            this.classType = classType;
+        }
+
+        public String getBeanName() {
+            return beanName;
+        }
+
+        public Class<T> getClassType() {
+            return classType;
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) {
+                return true;
+            }
+            if (o == null || getClass() != o.getClass()) {
+                return false;
+            }
+            SpringAggregate<?> that = (SpringAggregate<?>) o;
+            return Objects.equals(beanName, that.beanName) &&
+                    Objects.equals(classType, that.classType);
+        }
+
+        @Override
+        public int hashCode() {
+            return Objects.hash(beanName, classType);
         }
     }
 }

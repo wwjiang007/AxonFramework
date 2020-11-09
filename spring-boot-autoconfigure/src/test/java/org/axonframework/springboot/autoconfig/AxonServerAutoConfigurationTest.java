@@ -16,17 +16,22 @@
 
 package org.axonframework.springboot.autoconfig;
 
+import io.grpc.ManagedChannelBuilder;
+import org.axonframework.axonserver.connector.ManagedChannelCustomizer;
 import org.axonframework.axonserver.connector.TargetContextResolver;
 import org.axonframework.axonserver.connector.command.AxonServerCommandBus;
+import org.axonframework.axonserver.connector.event.axon.AxonServerEventScheduler;
 import org.axonframework.axonserver.connector.query.AxonServerQueryBus;
 import org.axonframework.commandhandling.CommandBus;
 import org.axonframework.commandhandling.SimpleCommandBus;
 import org.axonframework.disruptor.commandhandling.DisruptorCommandBus;
+import org.axonframework.eventhandling.EventBus;
+import org.axonframework.eventhandling.scheduling.EventScheduler;
 import org.axonframework.messaging.Message;
 import org.axonframework.queryhandling.QueryBus;
 import org.axonframework.queryhandling.QueryUpdateEmitter;
 import org.junit.jupiter.api.*;
-import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.api.extension.*;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.autoconfigure.AutoConfigurations;
@@ -49,6 +54,8 @@ class AxonServerAutoConfigurationTest {
 
     private static final TargetContextResolver<Message<?>> CUSTOM_TARGET_CONTEXT_RESOLVER =
             m -> "some-custom-context-resolution";
+    private static final ManagedChannelCustomizer CUSTOM_MANAGED_CHANNEL_CUSTOMIZER =
+            ManagedChannelBuilder::directExecutor;
 
     private final ApplicationContextRunner contextRunner = new ApplicationContextRunner()
             .withConfiguration(AutoConfigurations.of(
@@ -97,6 +104,20 @@ class AxonServerAutoConfigurationTest {
                                                  .isExactlyInstanceOf(AxonServerCommandBus.class);
                               assertThat(context).getBean("commandBus")
                                                  .isExactlyInstanceOf(SimpleCommandBus.class);
+                          });
+    }
+
+    @Test
+    void testAxonServerDefaultConfiguration_AxonServerDisabled() {
+        this.contextRunner.withPropertyValues("axon.axonserver.enabled=false")
+                          .withConfiguration(AutoConfigurations.of(AxonServerAutoConfiguration.class))
+                          .run(context -> {
+                              assertThat(context).getBeanNames(CommandBus.class)
+                                                 .hasSize(1);
+                              assertThat(context).doesNotHaveBean("axonServerCommandBus");
+                              assertThat(context).getBean("commandBus")
+                                                 .isExactlyInstanceOf(SimpleCommandBus.class);
+                              assertThat(context).hasSingleBean(EventBus.class);
                           });
     }
 
@@ -171,6 +192,30 @@ class AxonServerAutoConfigurationTest {
                           });
     }
 
+    @Test
+    void testAxonServerEventSchedulerIsConfigured() {
+        this.contextRunner.withConfiguration(AutoConfigurations.of(AxonServerAutoConfiguration.class))
+                          .run(context -> {
+                              assertThat(context).getBeanNames(EventScheduler.class)
+                                                 .hasSize(1);
+                              assertThat(context).getBean(EventScheduler.class)
+                                                 .isExactlyInstanceOf(AxonServerEventScheduler.class);
+                          });
+    }
+
+    @Test
+    void testCustomManagedChannelCustomizerIsConfigured() {
+        this.contextRunner.withConfiguration(AutoConfigurations.of(AxonServerAutoConfiguration.class))
+                          .withUserConfiguration(ManagedChannelCustomizerConfiguration.class)
+                          .run(context -> {
+                              assertThat(context).getBeanNames(ManagedChannelCustomizer.class)
+                                                 .hasSize(1);
+                              assertThat(context).getBean(ManagedChannelCustomizer.class)
+                                                 .isEqualTo(CUSTOM_MANAGED_CHANNEL_CUSTOMIZER);
+                          });
+    }
+
+
     private static class ExplicitUserCommandBusConfiguration {
 
         @Bean
@@ -202,6 +247,14 @@ class AxonServerAutoConfigurationTest {
         @Bean
         public TargetContextResolver<Message<?>> customTargetContextResolver() {
             return CUSTOM_TARGET_CONTEXT_RESOLVER;
+        }
+    }
+
+    private static class ManagedChannelCustomizerConfiguration {
+
+        @Bean
+        public ManagedChannelCustomizer customManagedChannelCustomizer() {
+            return CUSTOM_MANAGED_CHANNEL_CUSTOMIZER;
         }
     }
 }

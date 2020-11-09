@@ -1,11 +1,11 @@
 /*
- * Copyright (c) 2010-2019. Axon Framework
+ * Copyright (c) 2010-2020. Axon Framework
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *     http://www.apache.org/licenses/LICENSE-2.0
+ *    http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -18,7 +18,14 @@ package org.axonframework.eventsourcing.eventstore;
 
 import org.axonframework.common.AxonConfigurationException;
 import org.axonframework.common.jdbc.PersistenceExceptionResolver;
-import org.axonframework.eventhandling.*;
+import org.axonframework.eventhandling.DomainEventData;
+import org.axonframework.eventhandling.DomainEventMessage;
+import org.axonframework.eventhandling.EventMessage;
+import org.axonframework.eventhandling.TrackedEventData;
+import org.axonframework.eventhandling.TrackedEventMessage;
+import org.axonframework.eventhandling.TrackingToken;
+import org.axonframework.eventsourcing.snapshotting.SnapshotFilter;
+import org.axonframework.modelling.command.AggregateStreamCreationException;
 import org.axonframework.modelling.command.ConcurrencyException;
 import org.axonframework.serialization.Serializer;
 import org.axonframework.serialization.upcasting.event.EventUpcaster;
@@ -48,7 +55,7 @@ public abstract class AbstractEventStorageEngine implements EventStorageEngine {
     protected final EventUpcaster upcasterChain;
     private final PersistenceExceptionResolver persistenceExceptionResolver;
     private final Serializer eventSerializer;
-    private final Predicate<? super DomainEventData<?>> snapshotFilter;
+    private final SnapshotFilter snapshotFilter;
 
     /**
      * Instantiate a {@link AbstractEventStorageEngine} based on the fields contained in the {@link Builder}.
@@ -79,10 +86,10 @@ public abstract class AbstractEventStorageEngine implements EventStorageEngine {
     @Override
     public Optional<DomainEventMessage<?>> readSnapshot(String aggregateIdentifier) {
         return readSnapshotData(aggregateIdentifier)
-                .filter(snapshotFilter)
+                .filter(snapshotFilter::allow)
                 .map(snapshot -> upcastAndDeserializeDomainEvents(Stream.of(snapshot),
-                                                                             snapshotSerializer,
-                                                                             upcasterChain
+                                                                  snapshotSerializer,
+                                                                  upcasterChain
                 ))
                 .flatMap(DomainEventStream::asStream)
                 .findFirst()
@@ -106,20 +113,53 @@ public abstract class AbstractEventStorageEngine implements EventStorageEngine {
      * @param failedEvent The EventMessage that could not be persisted
      */
     protected void handlePersistenceException(Exception exception, EventMessage<?> failedEvent) {
-        String eventDescription;
-        if (failedEvent instanceof DomainEventMessage<?>) {
-            DomainEventMessage<?> failedDomainEvent = (DomainEventMessage<?>) failedEvent;
-            eventDescription =
-                    format("An event for aggregate [%s] at sequence [%d]", failedDomainEvent.getAggregateIdentifier(),
-                           failedDomainEvent.getSequenceNumber());
-        } else {
-            eventDescription = format("An event with identifier [%s]", failedEvent.getIdentifier());
-        }
+        String eventDescription = buildExceptionMessage(failedEvent);
         if (persistenceExceptionResolver != null && persistenceExceptionResolver.isDuplicateKeyViolation(exception)) {
-            throw new ConcurrencyException(eventDescription + " was already inserted", exception);
+            if (isFirstDomainEvent(failedEvent)) {
+                throw new AggregateStreamCreationException(eventDescription, exception);
+            }
+            throw new ConcurrencyException(eventDescription, exception);
         } else {
-            throw new EventStoreException(eventDescription + " could not be persisted", exception);
+            throw new EventStoreException(eventDescription, exception);
         }
+    }
+
+    /**
+     * Check whether or not this is the first event, which means we tried to create an aggregate through the given
+     * {@code failedEvent}.
+     *
+     * @param failedEvent the event to be checked
+     * @return true in case of first event, false otherwise
+     */
+    private boolean isFirstDomainEvent(EventMessage<?> failedEvent) {
+        if (failedEvent instanceof DomainEventMessage<?>) {
+            return ((DomainEventMessage<?>) failedEvent).getSequenceNumber() == 0L;
+        }
+        return false;
+    }
+
+    /**
+     * Build an exception message based on an EventMessage.
+     *
+     * @param failedEvent the event to be used for the exception message
+     * @return the created exception message
+     */
+    private String buildExceptionMessage(EventMessage<?> failedEvent) {
+        String eventDescription = format("An event with identifier [%s] could not be persisted",
+                                         failedEvent.getIdentifier());
+        if (isFirstDomainEvent(failedEvent)) {
+            DomainEventMessage<?> failedDomainEvent = (DomainEventMessage<?>) failedEvent;
+            eventDescription = format(
+                    "Cannot reuse aggregate identifier [%s] to create aggregate [%s] since identifiers need to be unique.",
+                    failedDomainEvent.getAggregateIdentifier(),
+                    failedDomainEvent.getType());
+        } else if (failedEvent instanceof DomainEventMessage<?>) {
+            DomainEventMessage<?> failedDomainEvent = (DomainEventMessage<?>) failedEvent;
+            eventDescription = format("An event for aggregate [%s] at sequence [%d] was already inserted",
+                                      failedDomainEvent.getAggregateIdentifier(),
+                                      failedDomainEvent.getSequenceNumber());
+        }
+        return eventDescription;
     }
 
     /**
@@ -173,7 +213,8 @@ public abstract class AbstractEventStorageEngine implements EventStorageEngine {
      * Returns a stream of serialized event entries for given {@code aggregateIdentifier} if the backing database
      * contains a snapshot of the aggregate.
      * <p>
-     * It is required that specific event storage engines return snapshots in descending order of their sequence number.
+     * It is required that specific event storage engines return snapshots in descending order of their sequence
+     * number.
      * </p>
      *
      * @param aggregateIdentifier The aggregate identifier to fetch a snapshot for
@@ -204,19 +245,19 @@ public abstract class AbstractEventStorageEngine implements EventStorageEngine {
      * <p>
      * The {@link Serializer} used for snapshots is defaulted to a {@link XStreamSerializer}, the {@link EventUpcaster}
      * defaults to a {@link NoOpEventUpcaster}, the Serializer used for events is also defaulted to a XStreamSerializer
-     * and the {@code snapshotFilter} defaults to a {@link Predicate} which returns {@code true} regardless.
+     * and the {@code snapshotFilter} defaults to a {@link SnapshotFilter#allowAll()} instance.
      */
     public abstract static class Builder {
 
-        private Supplier<Serializer> snapshotSerializer = XStreamSerializer::defaultSerializer;
+        private Supplier<Serializer> snapshotSerializer;
         protected EventUpcaster upcasterChain = NoOpEventUpcaster.INSTANCE;
         private PersistenceExceptionResolver persistenceExceptionResolver;
-        private Supplier<Serializer> eventSerializer = XStreamSerializer::defaultSerializer;
-        private Predicate<? super DomainEventData<?>> snapshotFilter = i -> true;
+        private Supplier<Serializer> eventSerializer;
+        private SnapshotFilter snapshotFilter = SnapshotFilter.allowAll();
 
         /**
-         * Sets the {@link Serializer} used to serialize and deserialize snapshots. Defaults to a
-         * {@link XStreamSerializer}.
+         * Sets the {@link Serializer} used to serialize and deserialize snapshots. Defaults to a {@link
+         * XStreamSerializer}.
          *
          * @param snapshotSerializer a {@link Serializer} used to serialize and deserialize snapshots
          * @return the current Builder instance, for fluent interfacing
@@ -228,8 +269,8 @@ public abstract class AbstractEventStorageEngine implements EventStorageEngine {
         }
 
         /**
-         * Sets the {@link EventUpcaster} used to deserialize events of older revisions. Defaults to a
-         * {@link NoOpEventUpcaster}.
+         * Sets the {@link EventUpcaster} used to deserialize events of older revisions. Defaults to a {@link
+         * NoOpEventUpcaster}.
          *
          * @param upcasterChain an {@link EventUpcaster} used to deserialize events of older revisions
          * @return the current Builder instance, for fluent interfacing
@@ -269,13 +310,29 @@ public abstract class AbstractEventStorageEngine implements EventStorageEngine {
 
         /**
          * Sets the {@code snapshotFilter} deciding whether to take a snapshot into account. Can be set to filter out
-         * specific snapshot revisions which should not be applied. Defaults to a {@link Predicate} which returns
-         * {@code true} regardless.
+         * specific snapshot revisions which should not be applied. Defaults to a {@link Predicate} which returns {@code
+         * true} regardless.
          *
          * @param snapshotFilter a {@link Predicate} which decides whether to take a snapshot into account
          * @return the current Builder instance, for fluent interfacing
+         * @deprecated in favor of {@link #snapshotFilter(SnapshotFilter)}
          */
+        @Deprecated
         public Builder snapshotFilter(Predicate<? super DomainEventData<?>> snapshotFilter) {
+            return snapshotFilter(snapshotFilter::test);
+        }
+
+        /**
+         * Sets the {@code snapshotFilter} deciding whether to take a snapshot into account. Can be set to filter out
+         * specific snapshot revisions which should not be applied. Defaults to {@link SnapshotFilter#allowAll()}.
+         * <p>
+         * Note that {@link SnapshotFilter} instances can be combined and should return {@code true} if they handle a
+         * snapshot they wish to ignore.
+         *
+         * @param snapshotFilter a {@link SnapshotFilter} which decides whether to take a snapshot into account
+         * @return the current Builder instance, for fluent interfacing
+         */
+        public Builder snapshotFilter(SnapshotFilter snapshotFilter) {
             assertNonNull(snapshotFilter, "The snapshotFilter may not be null");
             this.snapshotFilter = snapshotFilter;
             return this;
@@ -288,7 +345,13 @@ public abstract class AbstractEventStorageEngine implements EventStorageEngine {
          *                                    specifications
          */
         protected void validate() throws AxonConfigurationException {
-            // Kept to be overridden
+            if (snapshotSerializer == null) {
+                snapshotSerializer = XStreamSerializer::defaultSerializer;
+            }
+
+            if (eventSerializer == null) {
+                eventSerializer = XStreamSerializer::defaultSerializer;
+            }
         }
     }
 }

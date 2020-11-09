@@ -1,3 +1,19 @@
+/*
+ * Copyright (c) 2010-2020. Axon Framework
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package org.axonframework.axonserver.connector.heartbeat.connection.checker;
 
 import org.axonframework.axonserver.connector.AxonServerConnectionManager;
@@ -9,24 +25,22 @@ import java.time.temporal.ChronoUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
 
-import static io.axoniq.axonserver.grpc.control.PlatformOutboundInstruction.RequestCase.HEARTBEAT;
-
 /**
  * Implementation of {@link ConnectionSanityChecker} which verifies that heartbeats are properly received.
  *
  * @author Sara Pellegrini
  * @since 4.2.1
+ * @deprecated in through use of the <a href="https://github.com/AxonIQ/axonserver-connector-java">AxonServer java
+ * connector</a>
  */
+@Deprecated
 public class HeartbeatConnectionChecker implements ConnectionSanityChecker {
 
     private static final long DEFAULT_HEARTBEAT_TIMEOUT_MILLIS = 5_000;
 
     private final ConnectionSanityChecker delegate;
-
     private final long heartbeatTimeout;
-
     private final Clock clock;
-
     private final AtomicReference<Instant> lastReceivedHeartbeat = new AtomicReference<>();
 
     /**
@@ -36,14 +50,17 @@ public class HeartbeatConnectionChecker implements ConnectionSanityChecker {
      * @param context           the (Bounded) Context for which is verified the AxonServer connection
      */
     public HeartbeatConnectionChecker(AxonServerConnectionManager connectionManager, String context) {
-        this(r -> connectionManager.onOutboundInstruction(context, HEARTBEAT, i -> r.run()),
-             new ActiveGrpcChannelChecker(connectionManager, context));
+        this(r -> {
+        }, new ActiveGrpcChannelChecker(connectionManager, context));
     }
 
     /**
-     * Constructs an instance of {@link HeartbeatConnectionChecker} using a default timeout of 5 seconds and the system clock.
+     * Constructs an instance of {@link HeartbeatConnectionChecker} using a default timeout of 5 seconds and the system
+     * clock.
+     *
      * @param registration function which allows to register a callback for the reception of an heartbeat
-     * @param delegate another implementation of {@link ConnectionSanityChecker} that performs others kind of verifications
+     * @param delegate     another implementation of {@link ConnectionSanityChecker} that performs others kind of
+     *                     verifications
      */
     public HeartbeatConnectionChecker(Consumer<Runnable> registration,
                                       ConnectionSanityChecker delegate) {
@@ -53,11 +70,12 @@ public class HeartbeatConnectionChecker implements ConnectionSanityChecker {
     /**
      * Primary constructor of {@link HeartbeatConnectionChecker}.
      *
-     * @param heartbeatTimeout the time without any heartbeat after which the connection is considered no more valid;
-     *                         it is expressed in milliseconds
+     * @param heartbeatTimeout    the time without any heartbeat after which the connection is considered no more valid;
+     *                            it is expressed in milliseconds
      * @param registerOnHeartbeat function which allows to register a callback for the reception of an heartbeat
-     * @param delegate another implementation of {@link ConnectionSanityChecker} that performs others kind of verifications
-     * @param clock clock used to verify the timeout
+     * @param delegate            another implementation of {@link ConnectionSanityChecker} that performs others kind of
+     *                            verifications
+     * @param clock               clock used to verify the timeout
      */
     public HeartbeatConnectionChecker(long heartbeatTimeout,
                                       Consumer<Runnable> registerOnHeartbeat,
@@ -74,10 +92,10 @@ public class HeartbeatConnectionChecker implements ConnectionSanityChecker {
 
     /**
      * {@inheritDoc}
-     *
-     * Detects if the connection is still available according with the heartbeat timeout.
-     * If no heartbeat at all is received since the startup of the connection, this implementation returns {@code true}
-     * as we suppose that Axon Server version doesn't support the heartbeat feature.
+     * <p>
+     * Detects if the connection is still available according with the heartbeat timeout. If no heartbeat at all is
+     * received since the startup of the connection, this implementation returns {@code true} as we suppose that Axon
+     * Server version doesn't support the heartbeat feature.
      *
      * @return {@code true} if the connection is valid, {@code false} otherwise
      */

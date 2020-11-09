@@ -1,11 +1,11 @@
 /*
- * Copyright (c) 2010-2019. Axon Framework
+ * Copyright (c) 2010-2020. Axon Framework
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *     http://www.apache.org/licenses/LICENSE-2.0
+ *    http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -20,6 +20,7 @@ import org.axonframework.commandhandling.CommandBus;
 import org.axonframework.common.AxonConfigurationException;
 import org.axonframework.common.transaction.TransactionManager;
 import org.axonframework.eventhandling.EventBus;
+import org.axonframework.eventsourcing.Snapshotter;
 import org.axonframework.eventsourcing.eventstore.EventStorageEngine;
 import org.axonframework.eventsourcing.eventstore.EventStore;
 import org.axonframework.messaging.Message;
@@ -46,7 +47,9 @@ import java.util.function.Function;
  * through {@link #configureAggregate(Class)} and configure an Event Store ({@link #configureEventStore(Function)} or
  * {@link #configureEmbeddedEventStore(Function)}).
  *
+ * @author Allard Buijze
  * @see DefaultConfigurer
+ * @since 3.0
  */
 public interface Configurer {
 
@@ -202,64 +205,91 @@ public interface Configurer {
     <C> Configurer registerComponent(Class<C> componentType, Function<Configuration, ? extends C> componentBuilder);
 
     /**
-     * Registers a command handler bean with this configuration. The bean may be of any type. The actual command handler
-     * methods will be detected based on the annotations present on the bean's methods.
+     * Registers a command handler bean with this {@link Configurer}. The bean may be of any type. The actual command
+     * handler methods will be detected based on the annotations present on the bean's methods. Message handling
+     * functions annotated with {@link org.axonframework.commandhandling.CommandHandler} will be taken into account.
      * <p>
-     * The builder function receives the Configuration as input, and is expected to return a fully initialized instance
-     * of the command handler bean.
+     * The builder function receives the {@link Configuration} as input, and is expected to return a fully initialized
+     * instance of the command handler bean.
      *
-     * @param annotatedCommandHandlerBuilder The builder function of the Command Handler bean
-     * @return the current instance of the Configurer, for chaining purposes
+     * @param commandHandlerBuilder the builder function of the command handler bean
+     * @return the current instance of the {@link Configurer}, for chaining purposes
      */
-    default Configurer registerCommandHandler(Function<Configuration, Object> annotatedCommandHandlerBuilder) {
-        return registerCommandHandler(0, annotatedCommandHandlerBuilder);
+    Configurer registerCommandHandler(Function<Configuration, Object> commandHandlerBuilder);
+
+    /**
+     * Registers a command handler bean with this {@link Configurer}. The bean may be of any type. The actual command
+     * handler methods will be detected based on the annotations present on the bean's methods. Message handling
+     * functions annotated with {@link org.axonframework.commandhandling.CommandHandler} will be taken into account.
+     * <p>
+     * The builder function receives the {@link Configuration} as input, and is expected to return a fully initialized
+     * instance of the command handler bean.
+     *
+     * @param commandHandlerBuilder the builder function of the command handler bean
+     * @param phase                 defines a phase in which the command handler builder will be invoked during {@link
+     *                              Configuration#start()} and {@link Configuration#shutdown()}. When starting the
+     *                              configuration handlers are ordered in ascending, when shutting down the
+     *                              configuration, descending order is used.
+     * @return the current instance of the {@link Configurer}, for chaining purposes
+     * @deprecated in favor of {@link #registerCommandHandler(Function)}, since the {@code phase} of an annotated
+     * handler should be defined through the {@link org.axonframework.lifecycle.StartHandler}/{@link
+     * org.axonframework.lifecycle.ShutdownHandler} annotation.
+     */
+    @Deprecated
+    default Configurer registerCommandHandler(int phase, Function<Configuration, Object> commandHandlerBuilder) {
+        return registerCommandHandler(commandHandlerBuilder);
     }
 
     /**
-     * Registers a command handler bean with this configuration. The bean may be of any type. The actual command handler
-     * methods will be detected based on the annotations present on the bean's methods.
+     * Registers a query handler bean with this {@link Configurer}. The bean may be of any type. The actual query
+     * handler methods will be detected based on the annotations present on the bean's methods. Message handling
+     * functions annotated with {@link org.axonframework.queryhandling.QueryHandler} will be taken into account.
      * <p>
-     * The builder function receives the Configuration as input, and is expected to return a fully initialized instance
-     * of the command handler bean.
+     * The builder function receives the {@link Configuration} as input, and is expected to return a fully initialized
+     * instance of the query handler bean.
      *
-     * @param annotatedCommandHandlerBuilder The builder function of the Command Handler bean
-     * @param phase                          defines a phase in which the command handler builder will be invoked during
-     *                                       {@link Configuration#start()} and {@link Configuration#shutdown()}. When
-     *                                       starting the configuration handlers are ordered in ascending, when shutting
-     *                                       down the configuration, descending order is used.
-     * @return the current instance of the Configurer, for chaining purposes
+     * @param queryHandlerBuilder the builder function of the query handler bean
+     * @return the current instance of the {@link Configurer}, for chaining purposes
      */
-    Configurer registerCommandHandler(int phase, Function<Configuration, Object> annotatedCommandHandlerBuilder);
+    Configurer registerQueryHandler(Function<Configuration, Object> queryHandlerBuilder);
 
     /**
-     * Registers a query handler bean with this configuration. The bean may be of any type. The actual query handler
-     * methods will be detected based on the annotations present on the bean's methods.
+     * Registers a query handler bean with this {@link Configurer}. The bean may be of any type. The actual query
+     * handler methods will be detected based on the annotations present on the bean's methods. Message handling
+     * functions annotated with {@link org.axonframework.queryhandling.QueryHandler} will be taken into account.
      * <p>
-     * The builder function receives the Configuration as input, and is expected to return a fully initialized instance
-     * of the query handler bean.
+     * The builder function receives the {@link Configuration} as input, and is expected to return a fully initialized
+     * instance of the query handler bean.
      *
-     * @param annotatedQueryHandlerBuilder The builder function of the Query Handler bean
-     * @return the current instance of the Configurer, for chaining purposes
+     * @param queryHandlerBuilder the builder function of the query handler bean
+     * @param phase               defines a phase in which the query handler builder will be invoked during {@link
+     *                            Configuration#start()} and {@link Configuration#shutdown()}. When starting the
+     *                            configuration handlers are ordered in ascending, when shutting down the configuration,
+     *                            descending order is used.
+     * @return the current instance of the {@link Configurer}, for chaining purposes
+     * @deprecated in favor of {@link #registerQueryHandler(Function)}, since the {@code phase} of an annotated handler
+     * should be defined through the {@link org.axonframework.lifecycle.StartHandler}/{@link
+     * org.axonframework.lifecycle.ShutdownHandler} annotation.
      */
-    default Configurer registerQueryHandler(Function<Configuration, Object> annotatedQueryHandlerBuilder) {
-        return registerQueryHandler(0, annotatedQueryHandlerBuilder);
+    @Deprecated
+    default Configurer registerQueryHandler(int phase, Function<Configuration, Object> queryHandlerBuilder) {
+        return registerQueryHandler(queryHandlerBuilder);
     }
 
     /**
-     * Registers a query handler bean with this configuration. The bean may be of any type. The actual query handler
-     * methods will be detected based on the annotations present on the bean's methods.
+     * Registers a message handler bean with this configuration. The bean may be of any type. The actual message handler
+     * methods will be detected based on the annotations present on the bean's methods. Message handling functions
+     * annotated with {@link org.axonframework.commandhandling.CommandHandler}, {@link
+     * org.axonframework.eventhandling.EventHandler} and {@link org.axonframework.queryhandling.QueryHandler} will be
+     * taken into account.
      * <p>
-     * The builder function receives the Configuration as input, and is expected to return a fully initialized instance
-     * of the query handler bean.
+     * The builder function receives the {@link Configuration} as input, and is expected to return a fully initialized
+     * instance of the message handler bean.
      *
-     * @param annotatedQueryHandlerBuilder The builder function of the Query Handler bean
-     * @param phase                        defines a phase in which the query handler builder will be invoked during
-     *                                     {@link Configuration#start()} and {@link Configuration#shutdown()}. When
-     *                                     starting the configuration handlers are ordered in ascending, when shutting
-     *                                     down the configuration, descending order is used.
-     * @return the current instance of the Configurer, for chaining purposes
+     * @param messageHandlerBuilder the builder function of the message handler bean
+     * @return the current instance of the {@link Configurer}, for chaining purposes
      */
-    Configurer registerQueryHandler(int phase, Function<Configuration, Object> annotatedQueryHandlerBuilder);
+    Configurer registerMessageHandler(Function<Configuration, Object> messageHandlerBuilder);
 
     /**
      * Configures an Embedded Event Store which uses the given Event Storage Engine to store its events. The builder
@@ -436,6 +466,17 @@ public interface Configurer {
     Configurer registerHandlerDefinition(BiFunction<Configuration, Class, HandlerDefinition> handlerDefinitionClass);
 
     /**
+     * Registers a {@link Snapshotter} instance with this {@link Configurer}. Defaults to a {@link
+     * org.axonframework.eventsourcing.AggregateSnapshotter} implementation.
+     *
+     * @param snapshotterBuilder the builder function for the {@link Snapshotter}
+     * @return the current instance of the Configurer, for chaining purposes
+     */
+    default Configurer configureSnapshotter(Function<Configuration, Snapshotter> snapshotterBuilder) {
+        return registerComponent(Snapshotter.class, snapshotterBuilder);
+    }
+
+    /**
      * Retrieve the {@link EventProcessingConfigurer} registered as a module with this Configurer. If there aren't
      * any, it will create an {@link EventProcessingModule} and register it as a module. If there are multiple,
      * an {@link AxonConfigurationException} is thrown.
@@ -474,6 +515,16 @@ public interface Configurer {
     default Configurer registerEventHandler(Function<Configuration, Object> eventHandlerBuilder) {
         eventProcessing().registerEventHandler(eventHandlerBuilder);
         return this;
+    }
+
+    /**
+     * Register an initialization handler which should be invoked prior to starting this {@link Configurer}.
+     *
+     * @param initHandler a {@link Consumer} of the configuration, to be ran upon initialization of the {@link
+     *                    Configuration}
+     */
+    default void onInitialize(Consumer<Configuration> initHandler) {
+        registerModule(initHandler::accept);
     }
 
     /**

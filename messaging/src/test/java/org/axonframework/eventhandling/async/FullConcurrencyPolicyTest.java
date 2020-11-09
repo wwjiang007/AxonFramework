@@ -19,24 +19,24 @@ package org.axonframework.eventhandling.async;
 import org.axonframework.eventhandling.DomainEventMessage;
 import org.axonframework.eventhandling.GenericDomainEventMessage;
 import org.axonframework.messaging.MetaData;
-import org.junit.Test;
+import org.junit.jupiter.api.Test;
 
 import java.util.UUID;
 
-import static org.junit.Assert.assertNull;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 
 /**
  * @author Allard Buijze
+ * @author Henrique Sena
  */
-public class FullConcurrencyPolicyTest {
+class FullConcurrencyPolicyTest {
 
     @Test
-    public void testSequencingIdentifier() {
-        // ok, pretty useless, but everything should be tested
+    void testSequencingIdentifier() {
         FullConcurrencyPolicy testSubject = new FullConcurrencyPolicy();
-        assertNull(testSubject.getSequenceIdentifierFor(newStubDomainEvent(UUID.randomUUID())));
-        assertNull(testSubject.getSequenceIdentifierFor(newStubDomainEvent(UUID.randomUUID())));
-        assertNull(testSubject.getSequenceIdentifierFor(newStubDomainEvent(UUID.randomUUID())));
+        assertNotNull(testSubject.getSequenceIdentifierFor(newStubDomainEvent(UUID.randomUUID())));
+        assertNotNull(testSubject.getSequenceIdentifierFor(newStubDomainEvent(UUID.randomUUID())));
+        assertNotNull(testSubject.getSequenceIdentifierFor(newStubDomainEvent(UUID.randomUUID())));
     }
 
     private DomainEventMessage newStubDomainEvent(Object aggregateIdentifier) {

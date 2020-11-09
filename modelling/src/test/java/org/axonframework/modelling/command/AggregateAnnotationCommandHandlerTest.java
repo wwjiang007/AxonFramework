@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2010-2018. Axon Framework
+ * Copyright (c) 2010-2020. Axon Framework
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -40,11 +40,10 @@ import org.axonframework.modelling.command.inspection.AnnotatedAggregate;
 import org.axonframework.modelling.command.inspection.AnnotatedAggregateMetaModelFactory;
 import org.axonframework.modelling.utils.StubDomainEvent;
 import org.junit.jupiter.api.*;
-import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.api.extension.*;
 import org.mockito.*;
-import org.mockito.junit.jupiter.MockitoExtension;
-import org.mockito.junit.jupiter.MockitoSettings;
-import org.mockito.quality.Strictness;
+import org.mockito.junit.jupiter.*;
+import org.mockito.quality.*;
 
 import java.lang.reflect.Executable;
 import java.lang.reflect.Parameter;
@@ -63,6 +62,8 @@ import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
 
 /**
+ * Test class validating the {@link AggregateAnnotationCommandHandler}.
+ *
  * @author Allard Buijze
  * @author Nakul Mishra
  */
@@ -134,6 +135,7 @@ class AggregateAnnotationCommandHandlerTest {
         Set<String> actual = testSubject.supportedCommandNames();
         Set<String> expected = new HashSet<>(Arrays.asList(
                 CreateCommand.class.getName(),
+                CreateOrUpdateCommand.class.getName(),
                 CreateFactoryMethodCommand.class.getName(),
                 UpdateCommandWithAnnotatedMethod.class.getName(),
                 FailingCreateCommand.class.getName(),
@@ -161,8 +163,7 @@ class AggregateAnnotationCommandHandlerTest {
 
     @Test
     void testCommandHandlerCreatesAggregateInstance() throws Exception {
-
-        final CommandCallback callback = spy(LoggingCallback.INSTANCE);
+        final CommandCallback<Object, Object> callback = spy(LoggingCallback.INSTANCE);
         final CommandMessage<Object> message = asCommandMessage(new CreateCommand("id", "Hi"));
         commandBus.dispatch(message, callback);
         verify(mockRepository).newInstance(any());
@@ -175,11 +176,25 @@ class AggregateAnnotationCommandHandlerTest {
         assertEquals("id", responseCaptor.getValue().getPayload());
     }
 
+    @Test
+    public void testCommandHandlerCreatesOrUpdatesAggregateInstance() throws Exception {
+        final CommandCallback<Object, Object> callback = spy(LoggingCallback.INSTANCE);
+        final CommandMessage<Object> message = asCommandMessage(new CreateOrUpdateCommand("id", "Hi"));
+        when(mockRepository.loadOrCreate(anyString(), any()))
+                .thenReturn(createAggregate(new StubCommandAnnotatedAggregate()));
+        commandBus.dispatch(message, callback);
+        verify(mockRepository).loadOrCreate(anyString(), any());
+        ArgumentCaptor<CommandMessage<Object>> commandCaptor = ArgumentCaptor.forClass(CommandMessage.class);
+        ArgumentCaptor<CommandResultMessage<String>> responseCaptor = ArgumentCaptor
+                .forClass(CommandResultMessage.class);
+        verify(callback).onResult(commandCaptor.capture(), responseCaptor.capture());
+        assertEquals(message, commandCaptor.getValue());
+        assertEquals("Create or update works fine", responseCaptor.getValue().getPayload());
+    }
 
     @Test
     void testCommandHandlerCreatesAggregateInstanceWithFactoryMethod() throws Exception {
-
-        final CommandCallback callback = spy(LoggingCallback.INSTANCE);
+        final CommandCallback<Object, Object> callback = spy(LoggingCallback.INSTANCE);
         final CommandMessage<Object> message = asCommandMessage(new CreateFactoryMethodCommand("id", "Hi"));
         commandBus.dispatch(message, callback);
         verify(mockRepository).newInstance(any());
@@ -327,18 +342,14 @@ class AggregateAnnotationCommandHandlerTest {
                 .thenAnswer(i -> createAggregate(aggregateIdentifier));
         commandBus.dispatch(asCommandMessage(
                 new UpdateEntityStateCommand("abc123")),
-                            new CommandCallback<Object, Object>() {
-                                @Override
-                                public void onResult(CommandMessage<?> commandMessage,
-                                                     CommandResultMessage<?> commandResultMessage) {
-                                    if (commandResultMessage.isExceptional()) {
-                                        Throwable cause = commandResultMessage.exceptionResult();
-                                        if (!cause.getMessage().contains("entity")) {
-                                            fail("Got an exception, but not the right one.");
-                                        }
-                                    } else {
-                                        fail("Expected an exception, as the entity was not initialized");
+                            (commandMessage, commandResultMessage) -> {
+                                if (commandResultMessage.isExceptional()) {
+                                    Throwable cause = commandResultMessage.exceptionResult();
+                                    if (!cause.getMessage().contains("entity")) {
+                                        fail("Got an exception, but not the right one.");
                                     }
+                                } else {
+                                    fail("Expected an exception, as the entity was not initialized");
                                 }
                             }
         );
@@ -529,24 +540,32 @@ class AggregateAnnotationCommandHandlerTest {
         verify(mockRepository).load(aggregateIdentifier, null);
     }
 
+    @SuppressWarnings("unused")
     private abstract static class AbstractStubCommandAnnotatedAggregate {
 
         @AggregateIdentifier(routingKey = "aggregateIdentifier")
-        private final String identifier;
+        private String identifier;
 
         AbstractStubCommandAnnotatedAggregate(String identifier) {
             this.identifier = identifier;
+        }
+
+        public AbstractStubCommandAnnotatedAggregate() {
         }
 
         public String getIdentifier() {
             return identifier;
         }
 
+        public void setIdentifier(String identifier) {
+            this.identifier = identifier;
+        }
+
         @CommandHandler
         public abstract String handleUpdate(UpdateCommandWithAnnotatedMethod updateCommand);
     }
 
-    @SuppressWarnings("unused")
+    @SuppressWarnings({"unused", "MismatchedQueryAndUpdateOfCollection"})
     private static class StubCommandAnnotatedAggregate extends AbstractStubCommandAnnotatedAggregate {
 
         @AggregateMember
@@ -569,6 +588,7 @@ class AggregateAnnotationCommandHandlerTest {
             apply(new StubDomainEvent());
         }
 
+
         @CommandHandler
         public static StubCommandAnnotatedAggregate createStubCommandAnnotatedAggregate(
                 CreateFactoryMethodCommand createFactoryMethodCommand) {
@@ -581,8 +601,19 @@ class AggregateAnnotationCommandHandlerTest {
             throw new RuntimeException(createCommand.getParameter());
         }
 
-        StubCommandAnnotatedAggregate(String aggregateIdentifier) {
+        public StubCommandAnnotatedAggregate() {
+            super();
+        }
+
+        public StubCommandAnnotatedAggregate(String aggregateIdentifier) {
             super(aggregateIdentifier);
+        }
+
+        @CommandHandler
+        @CreationPolicy(AggregateCreationPolicy.CREATE_IF_MISSING)
+        public String handleCreateOrUpdate(CreateOrUpdateCommand createOrUpdateCommand) {
+            this.setIdentifier(createOrUpdateCommand.id);
+            return "Create or update works fine";
         }
 
         @Override
@@ -632,8 +663,10 @@ class AggregateAnnotationCommandHandlerTest {
         }
     }
 
+    @SuppressWarnings("unused")
     private static class CollectionFieldWithoutGenerics extends StubCommandAnnotatedAggregate {
 
+        @SuppressWarnings("rawtypes") // Intended for test
         @AggregateMember
         private List wrongField;
 
@@ -642,6 +675,7 @@ class AggregateAnnotationCommandHandlerTest {
         }
     }
 
+    @SuppressWarnings({"unused", "FieldCanBeLocal"})
     private static class StubCommandAnnotatedEntity {
 
         @AggregateMember
@@ -657,10 +691,11 @@ class AggregateAnnotationCommandHandlerTest {
         }
     }
 
+    @SuppressWarnings("unused")
     private static class StubCommandAnnotatedCollectionEntity {
 
         @EntityId
-        private String id;
+        private final String id;
 
         private StubCommandAnnotatedCollectionEntity(String id) {
             this.id = id;
@@ -676,6 +711,7 @@ class AggregateAnnotationCommandHandlerTest {
         }
     }
 
+    @SuppressWarnings("unused")
     private static class StubNestedCommandAnnotatedEntity {
 
         @CommandHandler
@@ -684,10 +720,11 @@ class AggregateAnnotationCommandHandlerTest {
         }
     }
 
+    @SuppressWarnings("unused")
     private static class StubCommandAnnotatedMapEntity {
 
         @EntityId(routingKey = "entityId")
-        private String id;
+        private final String id;
 
         private StubCommandAnnotatedMapEntity(String id) {
             this.id = id;
@@ -703,6 +740,7 @@ class AggregateAnnotationCommandHandlerTest {
         }
     }
 
+    @SuppressWarnings({"unused", "FieldCanBeLocal"})
     private static class UpdateNestedEntityStateCommand {
 
         @TargetAggregateIdentifier
@@ -716,8 +754,7 @@ class AggregateAnnotationCommandHandlerTest {
     private static class CreateCommand {
 
         private final String id;
-
-        private String parameter;
+        private final String parameter;
 
         private CreateCommand(String id, String parameter) {
             this.id = id;
@@ -733,12 +770,32 @@ class AggregateAnnotationCommandHandlerTest {
         }
     }
 
+    @SuppressWarnings("unused")
+    private static class CreateOrUpdateCommand {
 
+        @TargetAggregateIdentifier
+        private final String id;
+        private final String parameter;
+
+        private CreateOrUpdateCommand(String id, String parameter) {
+            this.id = id;
+            this.parameter = parameter;
+        }
+
+        public String getParameter() {
+            return parameter;
+        }
+
+        public String getId() {
+            return id;
+        }
+    }
+
+    @SuppressWarnings("unused")
     private static class CreateFactoryMethodCommand {
 
         private final String id;
-
-        private String parameter;
+        private final String parameter;
 
         private CreateFactoryMethodCommand(String id, String parameter) {
             this.id = id;
@@ -764,7 +821,7 @@ class AggregateAnnotationCommandHandlerTest {
 
     private static class UpdateCommandWithAnnotatedMethod {
 
-        private String aggregateIdentifier;
+        private final String aggregateIdentifier;
 
         private UpdateCommandWithAnnotatedMethod(String aggregateIdentifier) {
             this.aggregateIdentifier = aggregateIdentifier;
@@ -790,6 +847,7 @@ class AggregateAnnotationCommandHandlerTest {
         }
     }
 
+    @SuppressWarnings("unused")
     private static class UpdateCommandWithAnnotatedMethodAndVersion {
 
         private final String aggregateIdentifier;
@@ -826,11 +884,11 @@ class AggregateAnnotationCommandHandlerTest {
         }
     }
 
+    @SuppressWarnings({"unused", "FieldCanBeLocal"})
     private static class UpdateCommandWithAnnotatedFieldAndVersion {
 
         @TargetAggregateIdentifier
         private final String aggregateIdentifier;
-
         @TargetAggregateVersion
         private final Long expectedVersion;
 
@@ -840,6 +898,7 @@ class AggregateAnnotationCommandHandlerTest {
         }
     }
 
+    @SuppressWarnings({"unused", "FieldCanBeLocal"})
     private static class UpdateCommandWithAnnotatedFieldAndIntegerVersion {
 
         @TargetAggregateIdentifier
@@ -854,6 +913,7 @@ class AggregateAnnotationCommandHandlerTest {
         }
     }
 
+    @SuppressWarnings({"unused", "FieldCanBeLocal"})
     private static class UpdateEntityStateCommand {
 
         @TargetAggregateIdentifier
@@ -864,6 +924,7 @@ class AggregateAnnotationCommandHandlerTest {
         }
     }
 
+    @SuppressWarnings({"unused", "FieldCanBeLocal"})
     private static class UpdateEntityFromMapStateCommand {
 
         @TargetAggregateIdentifier
@@ -884,6 +945,7 @@ class AggregateAnnotationCommandHandlerTest {
     @Priority(Priority.LAST)
     private static class CustomParameterResolverFactory implements ParameterResolverFactory {
 
+        @SuppressWarnings("rawtypes")
         @Override
         public ParameterResolver createInstance(Executable member, Parameter[] params, int index) {
             if (String.class.equals(params[index].getType())) {
@@ -893,7 +955,8 @@ class AggregateAnnotationCommandHandlerTest {
         }
     }
 
-    private class UpdateEntityFromCollectionStateCommand {
+    @SuppressWarnings("unused")
+    private static class UpdateEntityFromCollectionStateCommand {
 
         @TargetAggregateIdentifier
         private final String aggregateId;

@@ -16,7 +16,11 @@
 
 package org.axonframework.common.jdbc;
 
-import java.sql.*;
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.function.Consumer;
@@ -42,12 +46,32 @@ public class JdbcUtils {
      * @param sqlFunction        the function that returns a {@link PreparedStatement} to execute the query against
      * @param sqlResultConverter converts the result set to a value of type R
      * @param errorHandler       handles errors as result of executing the query or converting the result set
-     * @param <R>                the result of the query after conversion
-     * @return the query result
+     * @param <R>                the type result of the query
+     * @return the query result  the result of the query
      */
     public static <R> R executeQuery(Connection connection, SqlFunction sqlFunction,
                                      SqlResultConverter<R> sqlResultConverter,
                                      Function<SQLException, RuntimeException> errorHandler) {
+        return executeQuery(connection, sqlFunction, sqlResultConverter, errorHandler, true);
+    }
+
+    /**
+     * Execute the query given by the {@code sqlFunction}. The {@link ResultSet} returned when the query is executed
+     * will be converted using the given {@code sqlResultConverter}. Any errors will be handled by the given {@code
+     * errorHandler}.
+     *
+     * @param connection         connection to the underlying database that should be used for the query
+     * @param sqlFunction        the function that returns a {@link PreparedStatement} to execute the query against
+     * @param sqlResultConverter converts the result set to a value of type R
+     * @param errorHandler       handles errors as result of executing the query or converting the result set
+     * @param closeConnection    whether provided {@code connection} should be closed or not
+     * @param <R>                the type result of the query
+     * @return the query result  the result of the query
+     */
+    public static <R> R executeQuery(Connection connection, SqlFunction sqlFunction,
+                                     SqlResultConverter<R> sqlResultConverter,
+                                     Function<SQLException, RuntimeException> errorHandler,
+                                     boolean closeConnection) {
         try {
             PreparedStatement preparedStatement = createSqlStatement(connection, sqlFunction);
             try {
@@ -68,7 +92,31 @@ public class JdbcUtils {
                 closeQuietly(preparedStatement);
             }
         } finally {
-            closeQuietly(connection);
+            if (closeConnection) {
+                closeQuietly(connection);
+            }
+        }
+    }
+
+    /**
+     * Execute the update statement produced by the given {@code updateFunction}. Any errors will be handled by the
+     * given {@code errorHandler}.
+     *
+     * @param connection     connection to the underlying database that should be used for the update
+     * @param updateFunction the function that produce the update statement
+     * @param errorHandler   handles errors as result of executing the update
+     * @return the update count resulting from the given {@code updateFunction}
+     */
+    public static int executeUpdate(Connection connection,
+                                    SqlFunction updateFunction,
+                                    Function<SQLException, RuntimeException> errorHandler) {
+        PreparedStatement preparedStatement = createSqlStatement(connection, updateFunction);
+        try {
+            return preparedStatement.executeUpdate();
+        } catch (SQLException e) {
+            throw errorHandler.apply(e);
+        } finally {
+            closeQuietly(preparedStatement);
         }
     }
 
@@ -81,7 +129,8 @@ public class JdbcUtils {
      * @param sqlFunctions the functions that produce the update statements
      * @return an array of update counts containing one element for each sql function
      */
-    public static int[] executeUpdates(Connection connection, Consumer<SQLException> errorHandler,
+    public static int[] executeUpdates(Connection connection,
+                                       Consumer<SQLException> errorHandler,
                                        SqlFunction... sqlFunctions) {
         try {
             int[] result = new int[sqlFunctions.length];

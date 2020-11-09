@@ -1,11 +1,11 @@
 /*
- * Copyright (c) 2010-2019. Axon Framework
+ * Copyright (c) 2010-2020. Axon Framework
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *     http://www.apache.org/licenses/LICENSE-2.0
+ *    http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -20,7 +20,15 @@ import org.axonframework.common.AxonConfigurationException;
 import org.axonframework.common.jdbc.ConnectionProvider;
 import org.axonframework.common.jdbc.JdbcException;
 import org.axonframework.eventhandling.TrackingToken;
-import org.axonframework.eventhandling.tokenstore.*;
+import org.axonframework.eventhandling.tokenstore.AbstractTokenEntry;
+import org.axonframework.eventhandling.tokenstore.ConfigToken;
+import org.axonframework.eventhandling.tokenstore.GenericTokenEntry;
+import org.axonframework.eventhandling.tokenstore.TokenStore;
+import org.axonframework.eventhandling.tokenstore.UnableToClaimTokenException;
+import org.axonframework.eventhandling.tokenstore.UnableToInitializeTokenException;
+import org.axonframework.eventhandling.tokenstore.UnableToRetrieveIdentifierException;
+import org.axonframework.serialization.SerializedObject;
+import org.axonframework.serialization.SerializedType;
 import org.axonframework.serialization.Serializer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -32,13 +40,17 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.time.Duration;
 import java.time.temporal.TemporalAmount;
+import java.util.Collections;
 import java.util.List;
 import java.util.Objects;
+import java.util.Optional;
+import java.util.UUID;
 
 import static java.lang.String.format;
 import static org.axonframework.common.BuilderUtils.assertNonNull;
 import static org.axonframework.common.BuilderUtils.assertThat;
 import static org.axonframework.common.DateTimeUtils.formatInstant;
+import static org.axonframework.common.ObjectUtils.getOrDefault;
 import static org.axonframework.common.jdbc.JdbcUtils.*;
 
 /**
@@ -51,6 +63,8 @@ import static org.axonframework.common.jdbc.JdbcUtils.*;
 public class JdbcTokenStore implements TokenStore {
 
     private static final Logger logger = LoggerFactory.getLogger(JdbcTokenStore.class);
+    private static final String CONFIG_TOKEN_ID = "__config";
+    private static final int CONFIG_SEGMENT = 0;
 
     private final ConnectionProvider connectionProvider;
     private final Serializer serializer;
@@ -158,17 +172,75 @@ public class JdbcTokenStore implements TokenStore {
     }
 
     @Override
+    public Optional<String> retrieveStorageIdentifier() throws UnableToRetrieveIdentifierException {
+        return Optional.of(loadConfigurationToken()).map(configToken -> configToken.get("id"));
+    }
+
+    private ConfigToken loadConfigurationToken() throws UnableToRetrieveIdentifierException {
+        Connection connection = getConnection();
+        TrackingToken token;
+        try {
+            token = executeQuery(connection, c -> select(connection, CONFIG_TOKEN_ID, CONFIG_SEGMENT, false),
+                                 resultSet -> {
+                                     if (resultSet.next()) {
+                                         return readTokenEntry(resultSet).getToken(serializer);
+                                     } else {
+                                         return null;
+                                     }
+                                 }, e -> new UnableToRetrieveIdentifierException("Exception while attempting to retrieve the config token", e),
+                                 false);
+            try {
+                if (token == null) {
+                    token = insertTokenEntry(connection, new ConfigToken(Collections.singletonMap("id", UUID.randomUUID().toString())), CONFIG_TOKEN_ID, CONFIG_SEGMENT);
+                }
+            } catch (SQLException e) {
+                throw new UnableToRetrieveIdentifierException("Exception while attempting to initialize the config token. It may have been concurrently initialized.", e);
+            }
+        } finally {
+            closeQuietly(connection);
+        }
+        return (ConfigToken) token;
+    }
+
+    /**
+     * Returns the serializer used by the Token Store to serialize tokens.
+     *
+     * @return the serializer used by the Token Store to serialize tokens
+     */
+    public Serializer serializer() {
+        return serializer;
+    }
+
+    @Override
     public void storeToken(TrackingToken token, String processorName, int segment) throws UnableToClaimTokenException {
         Connection connection = getConnection();
         try {
-            executeQuery(connection,
-                         c -> selectForUpdate(c, processorName, segment),
-                         resultSet -> {
-                             updateToken(connection, resultSet, token, processorName, segment);
-                             return null;
-                         },
-                         e -> new JdbcException(format("Could not store token [%s] for processor [%s] and segment [%d]",
-                                                       token, processorName, segment), e));
+            int updatedToken = executeUpdate(
+                    connection,
+                    c -> storeUpdate(connection, token, processorName, segment),
+                    e -> new JdbcException(format(
+                            "Could not store token [%s] for processor [%s] and segment [%d]",
+                            token, processorName, segment
+                    ), e)
+            );
+
+            if (updatedToken == 0) {
+                logger.debug("Could not update token [{}] for processor [{}] and segment [{}]. "
+                                     + "Trying load-then-save approach instead.",
+                             token, processorName, segment);
+                executeQuery(
+                        connection,
+                        c -> selectForUpdate(c, processorName, segment),
+                        resultSet -> {
+                            updateToken(connection, resultSet, token, processorName, segment);
+                            return null;
+                        },
+                        e -> new JdbcException(format(
+                                "Could not store token [%s] for processor [%s] and segment [%d]",
+                                token, processorName, segment
+                        ), e)
+                );
+            }
         } finally {
             closeQuietly(connection);
         }
@@ -263,6 +335,45 @@ public class JdbcTokenStore implements TokenStore {
     }
 
     /**
+     * Returns a {@link PreparedStatement} which updates the given {@code token} for the given {@code processorName} and
+     * {@code segment} combination.
+     *
+     * @param connection    the connection to the underlying database
+     * @param token         the new token to store
+     * @param processorName the name of the processor executing the update
+     * @param segment       the segment of the processor to executing the update
+     * @return a {@link PreparedStatement} that will update a token entry when executed
+     * @throws SQLException when an exception occurs while creating the prepared statement
+     */
+    protected PreparedStatement storeUpdate(Connection connection,
+                                            TrackingToken token,
+                                            String processorName,
+                                            int segment) throws SQLException {
+        AbstractTokenEntry<?> tokenToStore =
+                new GenericTokenEntry<>(token, serializer, contentType, processorName, segment);
+        Object tokenDataToStore = getOrDefault(tokenToStore.getSerializedToken(), SerializedObject::getData, null);
+        String tokenTypeToStore = getOrDefault(tokenToStore.getTokenType(), SerializedType::getName, null);
+
+        final String sql = "UPDATE " + schema.tokenTable() + " SET "
+                + schema.tokenColumn() + " = ?, "
+                + schema.tokenTypeColumn() + " = ?, "
+                + schema.timestampColumn() + " = ? "
+                + "WHERE " + schema.ownerColumn() + " = ? "
+                + "AND " + schema.processorNameColumn() + " = ? "
+                + "AND " + schema.segmentColumn() + " = ? ";
+        PreparedStatement preparedStatement = connection.prepareStatement(
+                sql, ResultSet.TYPE_FORWARD_ONLY, ResultSet.CONCUR_READ_ONLY
+        );
+        preparedStatement.setObject(1, tokenDataToStore);
+        preparedStatement.setString(2, tokenTypeToStore);
+        preparedStatement.setString(3, tokenToStore.timestampAsString());
+        preparedStatement.setString(4, nodeId);
+        preparedStatement.setString(5, processorName);
+        preparedStatement.setInt(6, segment);
+        return preparedStatement;
+    }
+
+    /**
      * Returns a {@link PreparedStatement} to select a token entry from the underlying storage. The {@link ResultSet}
      * that is returned when this statement is executed should be updatable.
      *
@@ -274,11 +385,28 @@ public class JdbcTokenStore implements TokenStore {
      */
     protected PreparedStatement selectForUpdate(Connection connection, String processorName,
                                                 int segment) throws SQLException {
+        return select(connection, processorName, segment, true);
+    }
+
+    /**
+     * Returns a {@link PreparedStatement} to select a token entry from the underlying storage, either for updating
+     * or just for reading.
+     *
+     * @param connection    the connection to the underlying database
+     * @param processorName the name of the processor to fetch the entry for
+     * @param segment       the segment of the processor to fetch the entry for
+     * @param forUpdate     whether the returned token should be updatable
+     *
+     * @return a {@link PreparedStatement} that will fetch an updatable token entry when executed
+     * @throws SQLException when an exception occurs while creating the prepared statement
+     */
+    protected PreparedStatement select(Connection connection, String processorName,
+                                       int segment, boolean forUpdate) throws SQLException {
         final String sql = "SELECT " +
                 String.join(", ", schema.processorNameColumn(), schema.segmentColumn(), schema.tokenColumn(),
                             schema.tokenTypeColumn(), schema.timestampColumn(), schema.ownerColum()) + " FROM " +
                 schema.tokenTable() + " WHERE " + schema.processorNameColumn() + " = ? AND " + schema.segmentColumn() +
-                " = ? FOR UPDATE";
+                " = ? " + (forUpdate ? "FOR UPDATE" : "");
         PreparedStatement preparedStatement = connection.prepareStatement(sql);
         preparedStatement.setString(1, processorName);
         preparedStatement.setInt(2, segment);

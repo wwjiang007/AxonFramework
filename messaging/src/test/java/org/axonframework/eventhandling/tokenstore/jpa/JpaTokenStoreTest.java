@@ -1,11 +1,11 @@
 /*
- * Copyright (c) 2010-2019. Axon Framework
+ * Copyright (c) 2010-2020. Axon Framework
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *     http://www.apache.org/licenses/LICENSE-2.0
+ *    http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -22,15 +22,16 @@ import org.axonframework.common.transaction.Transaction;
 import org.axonframework.common.transaction.TransactionManager;
 import org.axonframework.eventhandling.GlobalSequenceTrackingToken;
 import org.axonframework.eventhandling.TrackingToken;
+import org.axonframework.eventhandling.tokenstore.ConfigToken;
 import org.axonframework.eventhandling.tokenstore.UnableToClaimTokenException;
+import org.axonframework.serialization.TestSerializer;
 import org.axonframework.serialization.xml.XStreamSerializer;
 import org.hibernate.dialect.HSQLDialect;
 import org.hibernate.jpa.HibernatePersistenceProvider;
 import org.hsqldb.jdbc.JDBCDataSource;
-import org.junit.Assert;
-import org.junit.Before;
-import org.junit.Test;
-import org.junit.runner.RunWith;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.context.annotation.Bean;
@@ -40,7 +41,7 @@ import org.springframework.jmx.support.RegistrationPolicy;
 import org.springframework.orm.jpa.JpaTransactionManager;
 import org.springframework.orm.jpa.LocalContainerEntityManagerFactoryBean;
 import org.springframework.test.context.ContextConfiguration;
-import org.springframework.test.context.junit4.SpringJUnit4ClassRunner;
+import org.springframework.test.context.junit.jupiter.SpringExtension;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.TransactionDefinition;
 import org.springframework.transaction.TransactionStatus;
@@ -56,17 +57,31 @@ import java.time.Duration;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
-import java.util.concurrent.*;
+import java.util.Optional;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 
 import static org.hamcrest.CoreMatchers.is;
-import static org.junit.Assert.*;
+import static org.hamcrest.MatcherAssert.assertThat;
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.fail;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 
 @ContextConfiguration
-@RunWith(SpringJUnit4ClassRunner.class)
+@ExtendWith(SpringExtension.class)
 @EnableMBeanExport(registration = RegistrationPolicy.IGNORE_EXISTING)
 public class JpaTokenStoreTest {
 
@@ -90,7 +105,7 @@ public class JpaTokenStoreTest {
     private TransactionTemplate txTemplate;
 
     @Transactional
-    @Before
+    @BeforeEach
     public void setUp() {
         this.txTemplate = new TransactionTemplate(transactionManager);
     }
@@ -99,6 +114,7 @@ public class JpaTokenStoreTest {
     @Test
     public void testUpdateNullToken() {
         jpaTokenStore.initializeTokenSegments("test", 1);
+        jpaTokenStore.fetchToken("test", 0);
         jpaTokenStore.storeToken(null, "test", 0);
         List<TokenEntry> tokens = entityManager.createQuery("SELECT t FROM TokenEntry t " +
                                                                     "WHERE t.processorName = :processorName",
@@ -107,7 +123,42 @@ public class JpaTokenStoreTest {
                                                .getResultList();
         assertEquals(1, tokens.size());
         assertNotNull(tokens.get(0).getOwner());
-        assertNull(tokens.get(0).getToken(XStreamSerializer.builder().build()));
+        assertNull(tokens.get(0).getToken(TestSerializer.XSTREAM.getSerializer()));
+    }
+
+    @Transactional
+    @Test
+    void testUpdateAndLoadNullToken() {
+        jpaTokenStore.initializeTokenSegments("test", 1);
+        jpaTokenStore.fetchToken("test", 0);
+        entityManager.flush();
+        jpaTokenStore.storeToken(null, "test", 0);
+        entityManager.flush();
+        entityManager.clear();
+        TrackingToken token = jpaTokenStore.fetchToken("test", 0);
+        assertNull(token);
+    }
+
+    @Transactional
+    @Test
+    void testIdentifierInitializedOnDemand() {
+        Optional<String> id1 = jpaTokenStore.retrieveStorageIdentifier();
+        assertTrue(id1.isPresent());
+        Optional<String> id2 = jpaTokenStore.retrieveStorageIdentifier();
+        assertTrue(id2.isPresent());
+        assertEquals(id1.get(), id2.get());
+    }
+    @Transactional
+    @Test
+    void testIdentifierReadIfAvailable() {
+        entityManager.persist(new TokenEntry("__config", 0, new ConfigToken(Collections.singletonMap("id", "test")), jpaTokenStore.serializer() ));
+        Optional<String> id1 = jpaTokenStore.retrieveStorageIdentifier();
+        assertTrue(id1.isPresent());
+        Optional<String> id2 = jpaTokenStore.retrieveStorageIdentifier();
+        assertTrue(id2.isPresent());
+        assertEquals(id1.get(), id2.get());
+
+        assertEquals("test", id1.get());
     }
 
     @Transactional
@@ -156,10 +207,9 @@ public class JpaTokenStoreTest {
     }
 
     @Transactional
-    @Test(expected = UnableToClaimTokenException.class)
+    @Test
     public void testInitializeTokensWhileAlreadyPresent() {
-        jpaTokenStore.fetchToken("test1", 1);
-        jpaTokenStore.initializeTokenSegments("test1", 7);
+        assertThrows(UnableToClaimTokenException.class, () -> jpaTokenStore.fetchToken("test1", 1));
     }
 
     @Transactional
@@ -236,16 +286,16 @@ public class JpaTokenStoreTest {
 
         {
             final int[] segments = jpaTokenStore.fetchSegments("proc1");
-            Assert.assertThat(segments.length, is(2));
+            assertThat(segments.length, is(2));
         }
         {
             final int[] segments = jpaTokenStore.fetchSegments("proc2");
-            Assert.assertThat(segments.length, is(1));
+            assertThat(segments.length, is(1));
         }
 
         {
             final int[] segments = jpaTokenStore.fetchSegments("proc3");
-            Assert.assertThat(segments.length, is(0));
+            assertThat(segments.length, is(0));
         }
 
 
@@ -387,7 +437,7 @@ public class JpaTokenStoreTest {
             sessionFactory.setPackagesToScan(TokenEntry.class.getPackage().getName());
             sessionFactory.setJpaPropertyMap(Collections.singletonMap("hibernate.dialect", new HSQLDialect()));
             sessionFactory.setJpaPropertyMap(Collections.singletonMap("hibernate.hbm2ddl.auto", "create-drop"));
-            sessionFactory.setJpaPropertyMap(Collections.singletonMap("hibernate.show_sql", "true"));
+            sessionFactory.setJpaPropertyMap(Collections.singletonMap("hibernate.show_sql", "false"));
             sessionFactory.setJpaPropertyMap(Collections.singletonMap("hibernate.connection.url",
                                                                       "jdbc:hsqldb:mem:testdb"));
             return sessionFactory;
@@ -402,7 +452,7 @@ public class JpaTokenStoreTest {
         public JpaTokenStore jpaTokenStore(EntityManagerProvider entityManagerProvider) {
             return JpaTokenStore.builder()
                                 .entityManagerProvider(entityManagerProvider)
-                                .serializer(XStreamSerializer.builder().build())
+                                .serializer(TestSerializer.XSTREAM.getSerializer())
                                 .nodeId("local")
                                 .build();
         }

@@ -1,11 +1,11 @@
 /*
- * Copyright (c) 2010-2019. Axon Framework
+ * Copyright (c) 2010-2020. Axon Framework
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *     http://www.apache.org/licenses/LICENSE-2.0
+ *    http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -19,13 +19,14 @@ package org.axonframework.springboot.autoconfig;
 
 import org.axonframework.axonserver.connector.AxonServerConfiguration;
 import org.axonframework.axonserver.connector.AxonServerConnectionManager;
+import org.axonframework.axonserver.connector.ManagedChannelCustomizer;
 import org.axonframework.axonserver.connector.TargetContextResolver;
 import org.axonframework.axonserver.connector.command.AxonServerCommandBus;
 import org.axonframework.axonserver.connector.command.CommandLoadFactorProvider;
 import org.axonframework.axonserver.connector.command.CommandPriorityCalculator;
+import org.axonframework.axonserver.connector.event.axon.AxonServerEventScheduler;
 import org.axonframework.axonserver.connector.event.axon.AxonServerEventStore;
 import org.axonframework.axonserver.connector.event.axon.EventProcessorInfoConfiguration;
-import org.axonframework.axonserver.connector.heartbeat.HeartbeatConfiguration;
 import org.axonframework.axonserver.connector.query.AxonServerQueryBus;
 import org.axonframework.axonserver.connector.query.QueryPriorityCalculator;
 import org.axonframework.commandhandling.CommandBus;
@@ -34,6 +35,7 @@ import org.axonframework.commandhandling.distributed.AnnotationRoutingStrategy;
 import org.axonframework.commandhandling.distributed.RoutingStrategy;
 import org.axonframework.common.transaction.TransactionManager;
 import org.axonframework.config.EventProcessingConfiguration;
+import org.axonframework.eventhandling.scheduling.EventScheduler;
 import org.axonframework.eventsourcing.eventstore.EventStore;
 import org.axonframework.messaging.Message;
 import org.axonframework.messaging.interceptors.CorrelationDataInterceptor;
@@ -49,7 +51,6 @@ import org.axonframework.springboot.TagsConfigurationProperties;
 import org.axonframework.springboot.util.ConditionalOnMissingQualifiedBean;
 import org.springframework.beans.BeansException;
 import org.springframework.beans.factory.annotation.Qualifier;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.AutoConfigureBefore;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
@@ -71,6 +72,7 @@ import org.springframework.context.annotation.Primary;
 @AutoConfigureBefore(AxonAutoConfiguration.class)
 @ConditionalOnClass(AxonServerConfiguration.class)
 @EnableConfigurationProperties(TagsConfigurationProperties.class)
+@ConditionalOnProperty(name = "axon.axonserver.enabled", matchIfMissing = true)
 public class AxonServerAutoConfiguration implements ApplicationContextAware {
 
     private ApplicationContext applicationContext;
@@ -89,16 +91,24 @@ public class AxonServerAutoConfiguration implements ApplicationContextAware {
         return id;
     }
 
-    @Bean(destroyMethod = "shutdown")
+    @Bean
+    @ConditionalOnMissingBean
+    public ManagedChannelCustomizer managedChannelCustomizer() {
+        return ManagedChannelCustomizer.identity();
+    }
+
+    @Bean
     public AxonServerConnectionManager platformConnectionManager(AxonServerConfiguration axonServerConfiguration,
-                                                                 TagsConfigurationProperties tagsConfigurationProperties) {
+                                                                 TagsConfigurationProperties tagsConfigurationProperties,
+                                                                 ManagedChannelCustomizer managedChannelCustomizer) {
         return AxonServerConnectionManager.builder()
                                           .axonServerConfiguration(axonServerConfiguration)
                                           .tagsConfiguration(tagsConfigurationProperties.toTagsConfiguration())
+                                          .channelCustomizer(managedChannelCustomizer)
                                           .build();
     }
 
-    @Bean(destroyMethod = "disconnect")
+    @Bean
     @Primary
     @ConditionalOnMissingQualifiedBean(qualifier = "!localSegment", beanClass = CommandBus.class)
     public AxonServerCommandBus axonServerCommandBus(AxonServerConnectionManager axonServerConnectionManager,
@@ -151,7 +161,7 @@ public class AxonServerAutoConfiguration implements ApplicationContextAware {
         return LoggingQueryInvocationErrorHandler.builder().build();
     }
 
-    @Bean(destroyMethod = "disconnect")
+    @Bean
     @ConditionalOnMissingBean(QueryBus.class)
     public AxonServerQueryBus queryBus(AxonServerConnectionManager axonServerConnectionManager,
                                        AxonServerConfiguration axonServerConfiguration,
@@ -207,14 +217,6 @@ public class AxonServerAutoConfiguration implements ApplicationContextAware {
     }
 
     @Bean
-    @ConditionalOnProperty(value = "axon.axonserver.heartbeat.auto-configuration.enabled")
-    public HeartbeatConfiguration heartbeatConfiguration(AxonServerConnectionManager connectionManager,
-                                                         AxonServerConfiguration configuration) {
-        return new HeartbeatConfiguration(c -> connectionManager,
-                                          c -> configuration);
-    }
-
-    @Bean
     @ConditionalOnMissingBean
     public EventStore eventStore(AxonServerConfiguration axonServerConfiguration,
                                  AxonConfiguration configuration,
@@ -228,8 +230,19 @@ public class AxonServerAutoConfiguration implements ApplicationContextAware {
                                    .platformConnectionManager(axonServerConnectionManager)
                                    .snapshotSerializer(snapshotSerializer)
                                    .eventSerializer(eventSerializer)
+                                   .snapshotFilter(configuration.snapshotFilter())
                                    .upcasterChain(configuration.upcasterChain())
                                    .build();
+    }
+
+    @Bean
+    @ConditionalOnMissingBean
+    public EventScheduler eventScheduler(@Qualifier("eventSerializer") Serializer eventSerializer,
+                                         AxonServerConnectionManager connectionManager) {
+        return AxonServerEventScheduler.builder()
+                                       .eventSerializer(eventSerializer)
+                                       .connectionManager(connectionManager)
+                                       .build();
     }
 }
 

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2010-2018. Axon Framework
+ * Copyright (c) 2010-2020. Axon Framework
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,18 +18,22 @@ package org.axonframework.config;
 
 import org.axonframework.commandhandling.CommandBus;
 import org.axonframework.commandhandling.gateway.CommandGateway;
-import org.axonframework.eventhandling.gateway.EventGateway;
-import org.axonframework.modelling.command.Repository;
 import org.axonframework.common.AxonConfigurationException;
 import org.axonframework.deadline.DeadlineManager;
 import org.axonframework.eventhandling.EventBus;
-import org.axonframework.modelling.saga.ResourceInjector;
-import org.axonframework.modelling.saga.repository.NoResourceInjector;
+import org.axonframework.eventhandling.gateway.EventGateway;
+import org.axonframework.eventhandling.scheduling.EventScheduler;
+import org.axonframework.eventsourcing.AggregateFactory;
+import org.axonframework.eventsourcing.Snapshotter;
 import org.axonframework.eventsourcing.eventstore.EventStore;
+import org.axonframework.eventsourcing.snapshotting.SnapshotFilter;
 import org.axonframework.messaging.Message;
 import org.axonframework.messaging.annotation.HandlerDefinition;
 import org.axonframework.messaging.annotation.ParameterResolverFactory;
 import org.axonframework.messaging.correlation.CorrelationDataProvider;
+import org.axonframework.modelling.command.Repository;
+import org.axonframework.modelling.saga.ResourceInjector;
+import org.axonframework.modelling.saga.repository.NoResourceInjector;
 import org.axonframework.monitoring.MessageMonitor;
 import org.axonframework.queryhandling.QueryBus;
 import org.axonframework.queryhandling.QueryGateway;
@@ -38,6 +42,7 @@ import org.axonframework.serialization.Serializer;
 import org.axonframework.serialization.upcasting.event.EventUpcasterChain;
 
 import java.util.List;
+import java.util.concurrent.CompletableFuture;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
 
@@ -47,6 +52,9 @@ import java.util.stream.Collectors;
  * <p>
  * Note that certain components in the Configuration may need to be started. Therefore, before using any of the
  * components provided by this configuration, ensure that {@link #start()} has been invoked.
+ *
+ * @author Allard Buijze
+ * @since 3.0
  */
 public interface Configuration {
 
@@ -187,13 +195,45 @@ public interface Configuration {
     }
 
     /**
-     * Returns the Repository configured for the given {@code aggregateType}.
+     * Returns the {@link AggregateConfiguration} for the given {@code aggregateType}.
      *
-     * @param aggregateType The aggregate type to find the repository for
-     * @param <T>           The aggregate type
-     * @return the repository from which aggregates of the given type can be loaded
+     * @param aggregateType the aggregate type to find the {@link AggregateConfiguration} for
+     * @param <A>           the aggregate type
+     * @return the {@link AggregateConfiguration} for the given {@code aggregateType}
      */
-    <T> Repository<T> repository(Class<T> aggregateType);
+    default <A> AggregateConfiguration<A> aggregateConfiguration(Class<A> aggregateType) {
+        //noinspection unchecked
+        return findModules(AggregateConfiguration.class)
+                .stream()
+                .filter(aggregateConfig -> aggregateConfig.aggregateType().isAssignableFrom(aggregateType))
+                .findFirst()
+                .map(moduleConfig -> (AggregateConfiguration<A>) moduleConfig)
+                .orElseThrow(() -> new IllegalArgumentException(
+                        "Aggregate " + aggregateType.getSimpleName() + " has not been configured"
+                ));
+    }
+
+    /**
+     * Returns the {@link Repository} configured for the given {@code aggregateType}.
+     *
+     * @param aggregateType the aggregate type to find the {@link Repository} for
+     * @param <A>           the aggregate type
+     * @return the {@link Repository} from which aggregates of the given {@code aggregateType} can be loaded
+     */
+    default <A> Repository<A> repository(Class<A> aggregateType) {
+        return aggregateConfiguration(aggregateType).repository();
+    }
+
+    /**
+     * Returns the {@link AggregateFactory} configured for the given {@code aggregateType}.
+     *
+     * @param aggregateType the aggregate type to find the {@link AggregateFactory} for
+     * @param <A>           the aggregate type
+     * @return the {@link AggregateFactory} which constructs aggregate of the given {@code aggregateType}
+     */
+    default <A> AggregateFactory<A> aggregateFactory(Class<A> aggregateType) {
+        return aggregateConfiguration(aggregateType).aggregateFactory();
+    }
 
     /**
      * Returns the Component declared under the given {@code componentType}, typically the interface the component
@@ -291,12 +331,30 @@ public interface Configuration {
     HandlerDefinition handlerDefinition(Class<?> inspectedType);
 
     /**
-     * Returns the Deadline Manager defined in this Configuration.
+     * Returns the {@link EventScheduler} defined in this {@link Configuration}.
      *
-     * @return the Deadline Manager defined in this Configuration
+     * @return the {@link EventScheduler} defined in this {@link Configuration}
+     */
+    default EventScheduler eventScheduler() {
+        return getComponent(EventScheduler.class);
+    }
+
+    /**
+     * Returns the {@link DeadlineManager} defined in this {@link Configuration}.
+     *
+     * @return the {@link DeadlineManager} defined in this {@link Configuration}
      */
     default DeadlineManager deadlineManager() {
         return getComponent(DeadlineManager.class);
+    }
+
+    /**
+     * Returns the {@link Snapshotter} defined in this Configuration.
+     *
+     * @return the {@link Snapshotter} defined in this Configuration
+     */
+    default Snapshotter snapshotter() {
+        return getComponent(Snapshotter.class);
     }
 
     /**
@@ -307,60 +365,107 @@ public interface Configuration {
     List<ModuleConfiguration> getModules();
 
     /**
-     * Registers a handler to be executed when this Configuration is started.
+     * Registers a {@code startHandler} to be executed in the default phase {@code 0} when this Configuration is
+     * started.
      * <p>
      * The behavior for handlers that are registered when the Configuration is already started is undefined.
      *
-     * @param startHandler The handler to execute when the configuration is started
+     * @param startHandler the handler to execute when the configuration is started
      * @see #start()
-     * @see #onShutdown(Runnable)
      */
     default void onStart(Runnable startHandler) {
         onStart(0, startHandler);
     }
 
     /**
-     * Registers a handler to be executed when this Configuration is started.
+     * Registers a {@code startHandler} to be executed in the given {@code phase} when this Configuration is started.
      * <p>
      * The behavior for handlers that are registered when the Configuration is already started is undefined.
      *
-     * @param startHandler The handler to execute when the configuration is started
-     * @param phase        defines a phase in which the start handler will be invoked during {@link
-     *                     Configuration#start()} and {@link Configuration#shutdown()}. When starting the configuration
-     *                     handlers are ordered in ascending, when shutting down the configuration, descending order is
-     *                     used.
+     * @param phase        defines a {@code phase} in which the start handler will be invoked during {@link
+     *                     Configuration#start()}. When starting the configuration the given handlers are started in
+     *                     ascending order based on their {@code phase}
+     * @param startHandler the handler to execute when the configuration is started
      * @see #start()
-     * @see #onShutdown(Runnable)
      */
-    void onStart(int phase, Runnable startHandler);
+    default void onStart(int phase, Runnable startHandler) {
+        onStart(phase, () -> {
+            try {
+                startHandler.run();
+                return CompletableFuture.completedFuture(null);
+            } catch (Exception e) {
+                CompletableFuture<?> exceptionResult = new CompletableFuture<>();
+                exceptionResult.completeExceptionally(e);
+                return exceptionResult;
+            }
+        });
+    }
 
     /**
-     * Registers a handler to be executed when the Configuration is shut down.
+     * Registers an asynchronous {@code startHandler} to be executed in the given {@code phase} when this Configuration
+     * is started.
+     * <p>
+     * The behavior for handlers that are registered when the Configuration is already started is undefined.
+     *
+     * @param phase        defines a {@code phase} in which the start handler will be invoked during {@link
+     *                     Configuration#start()}. When starting the configuration the given handlers are started in
+     *                     ascending order based on their {@code phase}
+     * @param startHandler the handler to be executed asynchronously when the configuration is started
+     * @see #start()
+     */
+    void onStart(int phase, LifecycleHandler startHandler);
+
+    /**
+     * Registers a {@code shutdownHandler} to be executed in the default phase {@code 0} when the Configuration is shut
+     * down.
      * <p>
      * The behavior for handlers that are registered when the Configuration is already shut down is undefined.
      *
-     * @param shutdownHandler The handler to execute when the Configuration is shut down
+     * @param shutdownHandler the handler to execute when the Configuration is shut down
      * @see #shutdown()
-     * @see #onStart(Runnable)
      */
     default void onShutdown(Runnable shutdownHandler) {
         onShutdown(0, shutdownHandler);
     }
 
     /**
-     * Registers a handler to be executed when the Configuration is shut down.
+     * Registers a {@code shutdownHandler} to be executed in the given {@code phase} when the Configuration is shut
+     * down.
      * <p>
      * The behavior for handlers that are registered when the Configuration is already shut down is undefined.
      *
-     * @param shutdownHandler The handler to execute when the Configuration is shut down
      * @param phase           defines a phase in which the shutdown handler will be invoked during {@link
-     *                        Configuration#start()} and {@link Configuration#shutdown()}. When starting the
-     *                        configuration handlers are ordered in ascending, when shutting down the configuration,
-     *                        descending order is used.
+     *                        Configuration#shutdown()}. When shutting down the configuration the given handlers are
+     *                        executing in descending order based on their {@code phase}
+     * @param shutdownHandler the handler to execute when the Configuration is shut down
      * @see #shutdown()
-     * @see #onStart(Runnable)
      */
-    void onShutdown(int phase, Runnable shutdownHandler);
+    default void onShutdown(int phase, Runnable shutdownHandler) {
+        onShutdown(phase, () -> {
+            try {
+                shutdownHandler.run();
+                return CompletableFuture.completedFuture(null);
+            } catch (Exception e) {
+                CompletableFuture<?> exceptionResult = new CompletableFuture<>();
+                exceptionResult.completeExceptionally(e);
+                return exceptionResult;
+            }
+        });
+    }
+
+    /**
+     * Registers an asynchronous {@code shutdownHandler} to be executed in the given {@code phase} when the
+     * Configuration is shut down.
+     * <p>
+     * The behavior for handlers that are registered when the Configuration is already shut down is undefined.
+     *
+     * @param phase           defines a phase in which the shutdown handler will be invoked during {@link
+     *                        Configuration#shutdown()}. When shutting down the configuration the given handlers are
+     *                        executing in descending order based on their {@code phase}
+     * @param shutdownHandler the handler to be executed asynchronously when the Configuration is shut down
+     * @see #shutdown()
+     */
+    void onShutdown(int phase, LifecycleHandler shutdownHandler);
 
     /**
      * Returns the EventUpcasterChain with all registered upcasters.
@@ -368,4 +473,16 @@ public interface Configuration {
      * @return the EventUpcasterChain with all registered upcasters
      */
     EventUpcasterChain upcasterChain();
+
+    /**
+     * Returns the {@link SnapshotFilter} combining all defined filters per {@link AggregateConfigurer} in an {@link
+     * SnapshotFilter#combine(SnapshotFilter)} operation.
+     *
+     * @return the {@link SnapshotFilter}  combining all defined filters per {@link AggregateConfigurer}
+     */
+    default SnapshotFilter snapshotFilter() {
+        return findModules(AggregateConfiguration.class).stream()
+                                                        .map(AggregateConfiguration::snapshotFilter)
+                                                        .reduce(SnapshotFilter.allowAll(), SnapshotFilter::combine);
+    }
 }

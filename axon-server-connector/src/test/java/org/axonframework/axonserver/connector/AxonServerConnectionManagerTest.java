@@ -1,11 +1,11 @@
 /*
- * Copyright (c) 2010-2019. Axon Framework
+ * Copyright (c) 2010-2020. Axon Framework
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *     http://www.apache.org/licenses/LICENSE-2.0
+ *    http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -16,59 +16,68 @@
 
 package org.axonframework.axonserver.connector;
 
+import io.axoniq.axonserver.connector.AxonServerConnection;
 import io.axoniq.axonserver.grpc.control.ClientIdentification;
-import io.axoniq.axonserver.grpc.control.PlatformInboundInstruction;
-import io.axoniq.axonserver.grpc.control.PlatformOutboundInstruction;
+import io.axoniq.axonserver.grpc.control.PlatformInfo;
+import io.grpc.CallOptions;
+import io.grpc.Channel;
+import io.grpc.ClientCall;
+import io.grpc.ClientInterceptor;
+import io.grpc.MethodDescriptor;
 import io.grpc.stub.StreamObserver;
 import org.axonframework.axonserver.connector.event.StubServer;
+import org.axonframework.axonserver.connector.util.TcpUtil;
 import org.axonframework.config.TagsConfiguration;
-import org.junit.*;
+import org.junit.jupiter.api.*;
 
 import java.io.IOException;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.atomic.AtomicBoolean;
 
-import static org.axonframework.axonserver.connector.ErrorCode.UNSUPPORTED_INSTRUCTION;
 import static org.axonframework.axonserver.connector.utils.AssertUtils.assertWithin;
-import static org.junit.Assert.*;
-import static org.mockito.Mockito.*;
+import static org.junit.jupiter.api.Assertions.*;
 
 /**
  * Unit tests for {@link AxonServerConnectionManager}.
  *
  * @author Milan Savic
  */
-public class AxonServerConnectionManagerTest {
+class AxonServerConnectionManagerTest {
 
-    private StubServer stubServer = new StubServer(8124, 9657);
-    private StubServer secondNode = new StubServer(9657, 9657);
+    private StubServer stubServer;
+    private StubServer secondNode;
 
-    @Before
-    public void setUp() throws IOException {
+    @BeforeEach
+    void setUp() throws IOException {
+        int port1 = TcpUtil.findFreePort();
+        int port2 = TcpUtil.findFreePort();
+        stubServer = new StubServer(port1, port2);
+        secondNode = new StubServer(port2, port2);
         stubServer.start();
         secondNode.start();
     }
 
-    @After
-    public void tearDown() throws InterruptedException {
+    @AfterEach
+    void tearDown() throws InterruptedException {
         stubServer.shutdown();
         secondNode.shutdown();
     }
 
     @Test
-    public void checkWhetherConnectionPreferenceIsSent() {
+    void checkWhetherConnectionPreferenceIsSent() {
         TagsConfiguration tags = new TagsConfiguration(Collections.singletonMap("key", "value"));
-        AxonServerConfiguration configuration = AxonServerConfiguration.builder().build();
+        AxonServerConfiguration configuration = AxonServerConfiguration.builder().servers(
+                "localhost:" + stubServer.getPort()).build();
         AxonServerConnectionManager axonServerConnectionManager =
                 AxonServerConnectionManager.builder()
                                            .axonServerConfiguration(configuration)
                                            .tagsConfiguration(tags)
                                            .build();
 
-        assertNotNull(axonServerConnectionManager.getChannel());
+        assertNotNull(axonServerConnectionManager.getConnection("default"));
 
         List<ClientIdentification> clientIdentificationRequests = stubServer.getPlatformService()
                                                                             .getClientIdentificationRequests();
@@ -90,72 +99,103 @@ public class AxonServerConnectionManagerTest {
     }
 
     @Test
-    public void testFrameworkVersionSent() {
+    void testConnectionTimeout() throws IOException, InterruptedException {
         String version = "4.2.1";
-        AxonServerConfiguration configuration = AxonServerConfiguration.builder().build();
+        stubServer.shutdown();
+        stubServer = new StubServer(TcpUtil.findFreePort(), new PlatformService(TcpUtil.findFreePort()) {
+            @Override
+            public void getPlatformServer(ClientIdentification request, StreamObserver<PlatformInfo> responseObserver) {
+                // ignore calls
+            }
+        });
+        stubServer.start();
+        AxonServerConfiguration configuration = AxonServerConfiguration.builder()
+                                                                       .servers("localhost:" + stubServer.getPort())
+                                                                       .connectTimeout(50)
+                                                                       .build();
         AxonServerConnectionManager axonServerConnectionManager =
                 AxonServerConnectionManager.builder()
                                            .axonServerConfiguration(configuration)
                                            .axonFrameworkVersionResolver(() -> version)
                                            .build();
-
-        assertNotNull(axonServerConnectionManager.getChannel());
-
-        List<ClientIdentification> clientIdentificationRequests = stubServer.getPlatformService()
-                                                                            .getClientIdentificationRequests();
-        assertEquals(1, clientIdentificationRequests.size());
-        String receivedVersion = clientIdentificationRequests.get(0).getVersion();
-        assertEquals(version, receivedVersion);
+        try {
+            AxonServerConnection connection = axonServerConnectionManager.getConnection();
+            connection.commandChannel();
+            assertWithin(2, TimeUnit.SECONDS,
+                         () -> assertTrue(connection.isConnectionFailed(), "Was not expecting to get a connection"));
+        } catch (AxonServerException e) {
+            assertTrue(e.getMessage().contains("connection"));
+        }
     }
 
     @Test
-    public void unsupportedInstruction() {
-        AxonServerConfiguration configuration = AxonServerConfiguration.builder().build();
-        TestStreamObserver<PlatformInboundInstruction> requestStream = new TestStreamObserver<>();
-        AxonServerConnectionManager axonServerConnectionManager =
-                spy(AxonServerConnectionManager.builder()
-                                               .axonServerConfiguration(configuration)
-                                               .requestStreamFactory(so -> requestStream)
-                                               .build());
-        AtomicReference<StreamObserver<PlatformOutboundInstruction>> outboundStreamObserverRef = new AtomicReference<>();
-        doAnswer(invocationOnMock -> {
-            outboundStreamObserverRef.set(invocationOnMock.getArgument(1));
-            return new TestStreamObserver<PlatformOutboundInstruction>();
-        }).when(axonServerConnectionManager).getPlatformStream(any(), any());
+    void testEnablingHeartbeatsEnsuresHeartbeatMessagesAreSent() {
+        AxonServerConfiguration config = AxonServerConfiguration.builder()
+                                                                .servers("localhost:" + stubServer.getPort())
+                                                                .build();
+        config.getHeartbeat().setEnabled(true);
+        AxonServerConnectionManager connectionManager =
+                AxonServerConnectionManager.builder()
+                                           .axonServerConfiguration(config)
+                                           .build();
+        connectionManager.start();
 
-        axonServerConnectionManager.getChannel();
+        assertNotNull(connectionManager.getConnection(config.getContext()));
 
-        String instructionId = "instructionId";
-        outboundStreamObserverRef.get().onNext(PlatformOutboundInstruction.newBuilder()
-                                                                          .setInstructionId(instructionId)
-                                                                          .build());
-        assertTrue(requestStream.sentMessages()
-                                .stream()
-                                .anyMatch(inbound -> inbound.getRequestCase()
-                                                            .equals(PlatformInboundInstruction.RequestCase.ACK)
-                                        && !inbound.getAck().getSuccess()
-                                        && inbound.getAck().getError().getErrorCode().equals(UNSUPPORTED_INSTRUCTION.errorCode())
-                                        && inbound.getAck().getInstructionId().equals(instructionId)));
+        assertWithin(
+                250, TimeUnit.MILLISECONDS,
+                // Retrieving the messages from the secondNode, as the stubServer forwards all messages to this instance
+                () -> assertFalse(secondNode.getPlatformService().getHeartbeatMessages().isEmpty())
+        );
     }
 
     @Test
-    public void unsupportedInstructionWithoutInstructionId() {
-        AxonServerConfiguration configuration = AxonServerConfiguration.builder().build();
-        TestStreamObserver<PlatformInboundInstruction> requestStream = new TestStreamObserver<>();
+    void testDisablingHeartbeatsEnsuresNoHeartbeatMessagesAreSent() {
+        AxonServerConfiguration config = AxonServerConfiguration.builder()
+                                                                .servers("localhost:" + stubServer.getPort())
+                                                                .build();
+        config.getHeartbeat().setEnabled(false);
+        AxonServerConnectionManager connectionManager =
+                AxonServerConnectionManager.builder()
+                                           .axonServerConfiguration(config)
+                                           .build();
+        connectionManager.start();
+
+        assertNotNull(connectionManager.getConnection(config.getContext()));
+
+        assertWithin(
+                250, TimeUnit.MILLISECONDS,
+                // Retrieving the messages from the secondNode, as the stubServer forwards all messages to this instance
+                () -> assertTrue(secondNode.getPlatformService().getHeartbeatMessages().isEmpty())
+        );
+    }
+
+    @Test
+    void testChannelCustomization() {
+        AxonServerConfiguration configuration = AxonServerConfiguration.builder()
+                                                                       .servers("localhost:" + stubServer.getPort())
+                                                                       .build();
+        AtomicBoolean interceptorCalled = new AtomicBoolean();
         AxonServerConnectionManager axonServerConnectionManager =
-                spy(AxonServerConnectionManager.builder()
-                                               .axonServerConfiguration(configuration)
-                                               .requestStreamFactory(so -> requestStream)
-                                               .build());
-        AtomicReference<StreamObserver<PlatformOutboundInstruction>> outboundStreamObserverRef = new AtomicReference<>();
-        doAnswer(invocationOnMock -> {
-            outboundStreamObserverRef.set(invocationOnMock.getArgument(1));
-            return new TestStreamObserver<PlatformOutboundInstruction>();
-        }).when(axonServerConnectionManager).getPlatformStream(any(), any());
+                AxonServerConnectionManager.builder()
+                                           .axonServerConfiguration(configuration)
+                                           .channelCustomizer(
+                                                   builder -> builder.intercept(new ClientInterceptor() {
+                                                       @Override
+                                                       public <ReqT, RespT> ClientCall<ReqT, RespT> interceptCall(
+                                                               MethodDescriptor<ReqT, RespT> methodDescriptor,
+                                                               CallOptions callOptions,
+                                                               Channel channel
+                                                       ) {
+                                                           interceptorCalled.set(true);
+                                                           return channel.newCall(methodDescriptor,
+                                                                                  callOptions);
+                                                       }
+                                                   })
+                                           )
+                                           .build();
 
-        axonServerConnectionManager.getChannel();
-
-        outboundStreamObserverRef.get().onNext(PlatformOutboundInstruction.newBuilder().build());
-        assertEquals(0, requestStream.sentMessages().size());
+        assertNotNull(axonServerConnectionManager.getConnection());
+        assertTrue(interceptorCalled.get());
     }
 }

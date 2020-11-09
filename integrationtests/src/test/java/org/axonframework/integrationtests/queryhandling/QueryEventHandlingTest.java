@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2010-2018. Axon Framework
+ * Copyright (c) 2010-2020. Axon Framework
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -24,12 +24,12 @@ import org.axonframework.eventhandling.EventHandler;
 import org.axonframework.eventsourcing.eventstore.inmemory.InMemoryEventStorageEngine;
 import org.axonframework.queryhandling.QueryHandler;
 import org.axonframework.queryhandling.SimpleQueryBus;
-import org.junit.*;
+import org.junit.jupiter.api.*;
 
-public class QueryEventHandlingTest {
+class QueryEventHandlingTest {
 
     @Test
-    public void testQueryHandlerAndEventHandlerCleanlyShutdown() {
+    void testQueryHandlerAndEventHandlerCleanlyShutdown() {
         UserSummaryProjection userSummaryProjection = new UserSummaryProjection();
 
         Configurer configurer = DefaultConfigurer.defaultConfiguration();
@@ -47,34 +47,43 @@ public class QueryEventHandlingTest {
         configuration.shutdown();
     }
 
-    class UserCreatedEvent {
+    @SuppressWarnings("unused")
+    private static class UserCreatedEvent {
 
         private final String userId;
 
         UserCreatedEvent(String userId) {
             this.userId = userId;
         }
+
+        public String getUserId() {
+            return userId;
+        }
     }
 
-    class FindUserQuery {
+    @SuppressWarnings("unused")
+    private static class FindUserQuery {
 
         private final String userId;
 
         FindUserQuery(String userId) {
             this.userId = userId;
         }
+
+        public String getUserId() {
+            return userId;
+        }
     }
 
-    class UserSummaryProjection {
+    @SuppressWarnings("unused")
+    private static class UserSummaryProjection {
 
         @EventHandler
         public void on(UserCreatedEvent event) {
-            System.out.println("User created event handled");
         }
 
         @QueryHandler
         public UserSummaryProjection handle(FindUserQuery query) {
-            System.out.println("User created query handled");
             return null;
         }
     }

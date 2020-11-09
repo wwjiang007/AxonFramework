@@ -1,11 +1,11 @@
 /*
- * Copyright (c) 2010-2019. Axon Framework
+ * Copyright (c) 2010-2020. Axon Framework
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *     http://www.apache.org/licenses/LICENSE-2.0
+ *    http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -44,8 +44,8 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * Configurer module which is auto-loadable by the {@link org.axonframework.config.DefaultConfigurer} that sets
- * sensible default to use when the AxonServer connector is available on the classpath.
+ * Configurer module which is auto-loadable by the {@link org.axonframework.config.DefaultConfigurer} that sets sensible
+ * default to use when the AxonServer connector is available on the classpath.
  *
  * @author Allard Buijze
  * @since 4.0
@@ -58,6 +58,7 @@ public class ServerConnectorConfigurerModule implements ConfigurerModule {
     public void configureModule(Configurer configurer) {
         configurer.registerComponent(AxonServerConfiguration.class, c -> new AxonServerConfiguration());
         configurer.registerComponent(AxonServerConnectionManager.class, this::buildAxonServerConnectionManager);
+        configurer.registerComponent(ManagedChannelCustomizer.class, c -> ManagedChannelCustomizer.identity());
         configurer.configureEventStore(this::buildEventStore);
         configurer.configureCommandBus(this::buildCommandBus);
         configurer.configureQueryBus(this::buildQueryBus);
@@ -71,13 +72,13 @@ public class ServerConnectorConfigurerModule implements ConfigurerModule {
     }
 
     private AxonServerConnectionManager buildAxonServerConnectionManager(Configuration c) {
-        AxonServerConnectionManager axonServerConnectionManager =
-                AxonServerConnectionManager.builder()
-                                           .axonServerConfiguration(c.getComponent(AxonServerConfiguration.class))
-                                           .tagsConfiguration(c.getComponent(TagsConfiguration.class, TagsConfiguration::new))
-                                           .build();
-        c.onShutdown(axonServerConnectionManager::shutdown);
-        return axonServerConnectionManager;
+        return AxonServerConnectionManager.builder()
+                                          .axonServerConfiguration(c.getComponent(AxonServerConfiguration.class))
+                                          .tagsConfiguration(
+                                                  c.getComponent(TagsConfiguration.class, TagsConfiguration::new)
+                                          )
+                                          .channelCustomizer(c.getComponent(ManagedChannelCustomizer.class))
+                                          .build();
     }
 
     private AxonServerEventStore buildEventStore(Configuration c) {
@@ -87,34 +88,38 @@ public class ServerConnectorConfigurerModule implements ConfigurerModule {
                                    .messageMonitor(c.messageMonitor(AxonServerEventStore.class, "eventStore"))
                                    .snapshotSerializer(c.serializer())
                                    .eventSerializer(c.eventSerializer())
+                                   .snapshotFilter(c.snapshotFilter())
                                    .upcasterChain(c.upcasterChain())
                                    .build();
     }
 
     private AxonServerCommandBus buildCommandBus(Configuration c) {
+        SimpleCommandBus localSegment =
+                SimpleCommandBus.builder()
+                                .duplicateCommandHandlerResolver(c.getComponent(
+                                        DuplicateCommandHandlerResolver.class,
+                                        LoggingDuplicateCommandHandlerResolver::instance
+                                ))
+                                .messageMonitor(c.messageMonitor(CommandBus.class, "localCommandBus"))
+                                .transactionManager(c.getComponent(
+                                        TransactionManager.class, NoTransactionManager::instance
+                                ))
+                                .build();
         //noinspection unchecked - supresses `c.getComponent(TargetContextResolver.class)`
-        AxonServerCommandBus commandBus =
-                AxonServerCommandBus.builder()
-                                    .axonServerConnectionManager(c.getComponent(AxonServerConnectionManager.class))
-                                    .configuration(c.getComponent(AxonServerConfiguration.class))
-                                    .localSegment(SimpleCommandBus.builder()
-                                                                  .duplicateCommandHandlerResolver(c.getComponent(DuplicateCommandHandlerResolver.class,
-                                                                                                                  LoggingDuplicateCommandHandlerResolver::instance))
-                                                                  .messageMonitor(c.messageMonitor(CommandBus.class, "localCommandBus"))
-                                                                  .transactionManager(c.getComponent(TransactionManager.class, NoTransactionManager::instance))
-                                                                  .build())
-                                    .serializer(c.messageSerializer())
-                                    .routingStrategy(
-                                            c.getComponent(RoutingStrategy.class, AnnotationRoutingStrategy::new)
-                                    )
-                                    .priorityCalculator(c.getComponent(
-                                            CommandPriorityCalculator.class,
-                                            CommandPriorityCalculator::defaultCommandPriorityCalculator
-                                    ))
-                                    .targetContextResolver(c.getComponent(TargetContextResolver.class))
-                                    .build();
-        c.onShutdown(commandBus::disconnect);
-        return commandBus;
+        return AxonServerCommandBus.builder()
+                                   .axonServerConnectionManager(c.getComponent(AxonServerConnectionManager.class))
+                                   .configuration(c.getComponent(AxonServerConfiguration.class))
+                                   .localSegment(localSegment)
+                                   .serializer(c.messageSerializer())
+                                   .routingStrategy(
+                                           c.getComponent(RoutingStrategy.class, AnnotationRoutingStrategy::new)
+                                   )
+                                   .priorityCalculator(c.getComponent(
+                                           CommandPriorityCalculator.class,
+                                           CommandPriorityCalculator::defaultCommandPriorityCalculator
+                                   ))
+                                   .targetContextResolver(c.getComponent(TargetContextResolver.class))
+                                   .build();
     }
 
     private QueryBus buildQueryBus(Configuration c) {
@@ -131,22 +136,19 @@ public class ServerConnectorConfigurerModule implements ConfigurerModule {
                               .messageMonitor(c.messageMonitor(QueryBus.class, "localQueryBus"))
                               .build();
         //noinspection unchecked - supresses `c.getComponent(TargetContextResolver.class)`
-        AxonServerQueryBus queryBus =
-                AxonServerQueryBus.builder()
-                                  .axonServerConnectionManager(c.getComponent(AxonServerConnectionManager.class))
-                                  .configuration(c.getComponent(AxonServerConfiguration.class))
-                                  .localSegment(localSegment)
-                                  .updateEmitter(c.queryUpdateEmitter())
-                                  .messageSerializer(c.messageSerializer())
-                                  .genericSerializer(c.serializer())
-                                  .priorityCalculator(c.getComponent(
-                                          QueryPriorityCalculator.class,
-                                          QueryPriorityCalculator::defaultQueryPriorityCalculator
-                                  ))
-                                  .targetContextResolver(c.getComponent(TargetContextResolver.class))
-                                  .build();
-        c.onShutdown(queryBus::disconnect);
-        return queryBus;
+        return AxonServerQueryBus.builder()
+                                 .axonServerConnectionManager(c.getComponent(AxonServerConnectionManager.class))
+                                 .configuration(c.getComponent(AxonServerConfiguration.class))
+                                 .localSegment(localSegment)
+                                 .updateEmitter(c.queryUpdateEmitter())
+                                 .messageSerializer(c.messageSerializer())
+                                 .genericSerializer(c.serializer())
+                                 .priorityCalculator(c.getComponent(
+                                         QueryPriorityCalculator.class,
+                                         QueryPriorityCalculator::defaultQueryPriorityCalculator
+                                 ))
+                                 .targetContextResolver(c.getComponent(TargetContextResolver.class))
+                                 .build();
     }
 
     @Override

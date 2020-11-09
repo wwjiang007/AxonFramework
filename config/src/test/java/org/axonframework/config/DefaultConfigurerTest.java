@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2010-2018. Axon Framework
+ * Copyright (c) 2010-2020. Axon Framework
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,48 +16,77 @@
 
 package org.axonframework.config;
 
-import org.axonframework.commandhandling.*;
+import org.axonframework.commandhandling.AsynchronousCommandBus;
+import org.axonframework.commandhandling.CommandBus;
+import org.axonframework.commandhandling.CommandHandler;
+import org.axonframework.commandhandling.GenericCommandMessage;
 import org.axonframework.commandhandling.callbacks.FutureCallback;
-import org.axonframework.modelling.command.AggregateIdentifier;
-import org.axonframework.modelling.command.GenericJpaRepository;
-import org.axonframework.common.AxonConfigurationException;
+import org.axonframework.common.caching.WeakReferenceCache;
 import org.axonframework.common.jdbc.PersistenceExceptionResolver;
 import org.axonframework.common.jpa.SimpleEntityManagerProvider;
 import org.axonframework.common.transaction.Transaction;
 import org.axonframework.common.transaction.TransactionManager;
+import org.axonframework.config.utils.TestSerializer;
+import org.axonframework.eventhandling.DomainEventData;
+import org.axonframework.eventhandling.DomainEventMessage;
 import org.axonframework.eventhandling.EventMessageHandler;
+import org.axonframework.eventhandling.GenericDomainEventMessage;
 import org.axonframework.eventhandling.TrackingEventProcessor;
 import org.axonframework.eventhandling.TrackingEventProcessorConfiguration;
 import org.axonframework.eventhandling.async.FullConcurrencyPolicy;
 import org.axonframework.eventhandling.tokenstore.TokenStore;
+import org.axonframework.eventsourcing.AggregateSnapshotter;
+import org.axonframework.eventsourcing.CachingEventSourcingRepository;
+import org.axonframework.eventsourcing.EventCountSnapshotTriggerDefinition;
 import org.axonframework.eventsourcing.EventSourcingHandler;
+import org.axonframework.eventsourcing.EventSourcingRepository;
+import org.axonframework.eventsourcing.Snapshotter;
+import org.axonframework.eventsourcing.eventstore.AbstractSnapshotEventEntry;
+import org.axonframework.eventsourcing.eventstore.EventStore;
 import org.axonframework.eventsourcing.eventstore.inmemory.InMemoryEventStorageEngine;
+import org.axonframework.eventsourcing.eventstore.jpa.DomainEventEntry;
 import org.axonframework.eventsourcing.eventstore.jpa.JpaEventStorageEngine;
+import org.axonframework.eventsourcing.snapshotting.SnapshotFilter;
+import org.axonframework.lifecycle.LifecycleHandlerInvocationException;
 import org.axonframework.messaging.GenericMessage;
 import org.axonframework.messaging.interceptors.TransactionManagingInterceptor;
+import org.axonframework.modelling.command.AggregateIdentifier;
+import org.axonframework.modelling.command.GenericJpaRepository;
 import org.axonframework.modelling.command.VersionedAggregateIdentifier;
 import org.axonframework.queryhandling.QueryUpdateEmitter;
 import org.axonframework.queryhandling.SimpleQueryUpdateEmitter;
-import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.AfterEach;
-import org.junit.jupiter.api.BeforeEach;
-import org.mockito.*;
+import org.axonframework.serialization.Serializer;
+import org.axonframework.serialization.xml.XStreamSerializer;
+import org.junit.jupiter.api.*;
 
-import javax.persistence.*;
 import java.time.Duration;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
-import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.stream.Stream;
+import javax.persistence.Entity;
+import javax.persistence.EntityManager;
+import javax.persistence.EntityManagerFactory;
+import javax.persistence.EntityTransaction;
+import javax.persistence.Id;
+import javax.persistence.Persistence;
 
-import static org.axonframework.config.utils.AssertUtils.assertRetryingWithin;
-import static org.axonframework.modelling.command.AggregateLifecycle.apply;
 import static org.axonframework.config.AggregateConfigurer.defaultConfiguration;
 import static org.axonframework.config.AggregateConfigurer.jpaMappedConfiguration;
 import static org.axonframework.config.ConfigAssertions.assertExpectedModules;
+import static org.axonframework.config.utils.AssertUtils.assertRetryingWithin;
+import static org.axonframework.config.utils.TestSerializer.secureXStreamSerializer;
+import static org.axonframework.modelling.command.AggregateLifecycle.apply;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
 
+/**
+ * Test class validating several {@link DefaultConfigurer} operations.
+ *
+ * @author Allard Buijze
+ */
 class DefaultConfigurerTest {
 
     private EntityManager em;
@@ -89,6 +118,7 @@ class DefaultConfigurerTest {
         config.commandBus().dispatch(GenericCommandMessage.asCommandMessage("test"), callback);
         assertEquals("test", callback.get().getPayload());
         assertNotNull(config.repository(StubAggregate.class));
+        assertEquals(EventSourcingRepository.class, config.repository(StubAggregate.class).getClass());
         assertEquals(1, config.getModules().size());
         assertExpectedModules(config,
                               AggregateConfiguration.class);
@@ -149,6 +179,7 @@ class DefaultConfigurerTest {
                                           .persistenceExceptionResolver(c.getComponent(PersistenceExceptionResolver.class))
                                           .entityManagerProvider(() -> em)
                                           .transactionManager(c.getComponent(TransactionManager.class))
+                                          .eventSerializer(secureXStreamSerializer())
                                           .build()
         ).configureAggregate(
                 defaultConfiguration(StubAggregate.class).configureCommandTargetResolver(
@@ -238,8 +269,8 @@ class DefaultConfigurerTest {
 
         try {
             config.start();
-            fail("Expected AxonConfigurationException");
-        } catch (AxonConfigurationException e) {
+            fail("Expected LifecycleHandlerInvocationException");
+        } catch (LifecycleHandlerInvocationException e) {
             // expected
         }
     }
@@ -312,62 +343,6 @@ class DefaultConfigurerTest {
     }
 
     @Test
-    void testModuleHandlersOrdering() {
-        ModuleConfiguration module1 = mock(ModuleConfiguration.class);
-        ModuleConfiguration module2 = mock(ModuleConfiguration.class);
-        ModuleConfiguration module3 = mock(ModuleConfiguration.class);
-        when(module1.phase()).thenReturn(2);
-        when(module2.phase()).thenReturn(3);
-        when(module3.phase()).thenReturn(1);
-
-        Configuration configuration = DefaultConfigurer.defaultConfiguration()
-                                                       .registerModule(module1)
-                                                       .registerModule(module2)
-                                                       .registerModule(module3)
-                                                       .start();
-        assertNotNull(configuration);
-        configuration.shutdown();
-
-        InOrder inOrder = inOrder(module1, module2, module3);
-        inOrder.verify(module3).initialize(configuration);
-        inOrder.verify(module1).initialize(configuration);
-        inOrder.verify(module2).initialize(configuration);
-        inOrder.verify(module3).start();
-        inOrder.verify(module1).start();
-        inOrder.verify(module2).start();
-        inOrder.verify(module2).shutdown();
-        inOrder.verify(module1).shutdown();
-        inOrder.verify(module3).shutdown();
-    }
-
-    @Test
-    void testModuleHandlersOrderingAfterConfigIsInitialized() {
-        ModuleConfiguration module1 = mock(ModuleConfiguration.class);
-        ModuleConfiguration module2 = mock(ModuleConfiguration.class);
-        ModuleConfiguration module3 = mock(ModuleConfiguration.class);
-        when(module1.phase()).thenReturn(2);
-        when(module2.phase()).thenReturn(3);
-        when(module3.phase()).thenReturn(1);
-
-        Configurer configurer = DefaultConfigurer.defaultConfiguration();
-        Configuration configuration = configurer.buildConfiguration();
-        configurer.registerModule(module1)
-                  .registerModule(module2)
-                  .registerModule(module3);
-        configuration.start();
-        assertNotNull(configuration);
-        configuration.shutdown();
-
-        InOrder inOrder = inOrder(module1, module2, module3);
-        inOrder.verify(module3).start();
-        inOrder.verify(module1).start();
-        inOrder.verify(module2).start();
-        inOrder.verify(module2).shutdown();
-        inOrder.verify(module1).shutdown();
-        inOrder.verify(module3).shutdown();
-    }
-
-    @Test
     void testQueryUpdateEmitterConfigurationPropagatedToTheQueryBus() {
         QueryUpdateEmitter queryUpdateEmitter = SimpleQueryUpdateEmitter.builder().build();
         Configuration configuration = DefaultConfigurer.defaultConfiguration()
@@ -377,9 +352,141 @@ class DefaultConfigurerTest {
         assertEquals(queryUpdateEmitter, configuration.queryUpdateEmitter());
     }
 
+    @Test
+    void defaultConfigurationWithCache() throws Exception {
+        Configuration config = DefaultConfigurer.defaultConfiguration()
+            .configureEmbeddedEventStore(c -> new InMemoryEventStorageEngine())
+            .configureCommandBus(c -> AsynchronousCommandBus.builder().build())
+            .configureAggregate(
+                defaultConfiguration(StubAggregate.class).configureCache(c-> new WeakReferenceCache())
+             )
+            .buildConfiguration();
+        config.start();
+
+        FutureCallback<Object, Object> callback = new FutureCallback<>();
+        config.commandBus().dispatch(GenericCommandMessage.asCommandMessage("test"), callback);
+        assertEquals("test", callback.get().getPayload());
+        assertNotNull(config.repository(StubAggregate.class));
+        assertEquals(CachingEventSourcingRepository.class, config.repository(StubAggregate.class).getClass());
+    }
+
+    @Test
+    void testConfiguredSnapshotterDefaultsToAggregateSnapshotter() {
+        Snapshotter defaultSnapshotter = DefaultConfigurer.jpaConfiguration(() -> em)
+                                                          .configureAggregate(StubAggregate.class)
+                                                          .buildConfiguration().snapshotter();
+
+        assertTrue(defaultSnapshotter instanceof AggregateSnapshotter);
+    }
+
+    @Test
+    void testConfigureSnapshotterSetsCustomSnapshotter() {
+        Snapshotter expectedSnapshotter = mock(Snapshotter.class);
+
+        AggregateConfigurer<StubAggregate> aggregateConfigurer = defaultConfiguration(StubAggregate.class)
+                .configureSnapshotTrigger(configuration -> {
+                    Snapshotter resultSnapshotter = configuration.snapshotter();
+                    assertEquals(expectedSnapshotter, resultSnapshotter);
+                    return new EventCountSnapshotTriggerDefinition(resultSnapshotter, 42);
+                });
+
+        Configuration result = DefaultConfigurer.defaultConfiguration()
+                                                .configureEmbeddedEventStore(c -> new InMemoryEventStorageEngine())
+                                                .configureSnapshotter(configuration -> expectedSnapshotter)
+                                                .configureAggregate(aggregateConfigurer)
+                                                .buildConfiguration();
+        result.start();
+
+        assertEquals(expectedSnapshotter, result.snapshotter());
+        assertEquals(expectedSnapshotter, result.getComponent(Snapshotter.class));
+    }
+
+    @Test
+    void testConfigurationSnapshotFilterContainsConfiguredSnapshotFilters() {
+        AtomicBoolean filteredFirst = new AtomicBoolean(false);
+        SnapshotFilter testFilterOne = snapshotData -> {
+            filteredFirst.set(true);
+            return true;
+        };
+        AggregateConfigurer<StubAggregate> aggregateConfigurerOne =
+                AggregateConfigurer.defaultConfiguration(StubAggregate.class)
+                                   .configureSnapshotFilter(configuration -> testFilterOne);
+
+        AtomicBoolean filteredSecond = new AtomicBoolean(false);
+        SnapshotFilter testFilterTwo = snapshotData -> {
+            filteredSecond.set(true);
+            return true;
+        };
+        AggregateConfigurer<StubAggregate> aggregateConfigurerTwo =
+                AggregateConfigurer.defaultConfiguration(StubAggregate.class)
+                                   .configureSnapshotFilter(configuration -> testFilterTwo);
+
+        Configuration resultConfig = DefaultConfigurer.defaultConfiguration()
+                                                      .configureAggregate(aggregateConfigurerOne)
+                                                      .configureAggregate(aggregateConfigurerTwo)
+                                                      .buildConfiguration();
+
+        SnapshotFilter snapshotFilter = resultConfig.snapshotFilter();
+        boolean result = snapshotFilter.allow(mock(DomainEventData.class));
+        assertTrue(result);
+        assertTrue(filteredFirst.get());
+        assertTrue(filteredSecond.get());
+    }
+
+    @Test
+    void testAggregateSnapshotFilterIsAddedToTheEventStore() {
+        AtomicBoolean filteredFirst = new AtomicBoolean(false);
+        SnapshotFilter testFilterOne = snapshotData -> {
+            filteredFirst.set(true);
+            return true;
+        };
+        AggregateConfigurer<StubAggregate> aggregateConfigurerOne =
+                AggregateConfigurer.defaultConfiguration(StubAggregate.class)
+                                   .configureSnapshotFilter(configuration -> testFilterOne);
+
+        AtomicBoolean filteredSecond = new AtomicBoolean(false);
+        SnapshotFilter testFilterTwo = snapshotData -> {
+            filteredSecond.set(true);
+            return true;
+        };
+        AggregateConfigurer<StubAggregate> aggregateConfigurerTwo =
+                AggregateConfigurer.defaultConfiguration(StubAggregate.class)
+                                   .configureSnapshotFilter(configuration -> testFilterTwo);
+
+        Serializer serializer = XStreamSerializer.defaultSerializer();
+        EntityManagerTransactionManager transactionManager = spy(new EntityManagerTransactionManager(em));
+
+        DomainEventMessage<String> testDomainEvent =
+                new GenericDomainEventMessage<>("StubAggregate", "some-aggregate-id", 0, "some-payload");
+        DomainEventData<byte[]> snapshotData =
+                new AbstractSnapshotEventEntry<byte[]>(testDomainEvent, serializer, byte[].class) {
+                };
+        DomainEventData<byte[]> domainEventData = new DomainEventEntry(testDomainEvent, serializer);
+        // Firstly snapshot data will be retrieved (and filtered), secondly event data.
+        doReturn(
+                Stream.of(snapshotData),
+                Collections.singletonList(domainEventData)
+        ).when(transactionManager).fetchInTransaction(any());
+
+        Configuration resultConfig = DefaultConfigurer.jpaConfiguration(() -> em)
+                                                      .configureEventSerializer(configuration -> serializer)
+                                                      .configureTransactionManager(configuration -> transactionManager)
+                                                      .configureAggregate(aggregateConfigurerOne)
+                                                      .configureAggregate(aggregateConfigurerTwo)
+                                                      .buildConfiguration();
+
+        EventStore resultEventStore = resultConfig.eventStore();
+        resultEventStore.readEvents("some-aggregate-id");
+
+        assertTrue(filteredFirst.get());
+        assertTrue(filteredSecond.get());
+    }
+
+    @SuppressWarnings("unused")
     @Entity(name = "StubAggregate")
     private static class StubAggregate {
 
+        @SuppressWarnings("FieldCanBeLocal")
         @Id
         @AggregateIdentifier
         private String id;

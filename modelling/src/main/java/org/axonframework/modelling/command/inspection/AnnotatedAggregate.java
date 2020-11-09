@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2010-2018. Axon Framework
+ * Copyright (c) 2010-2020. Axon Framework
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,12 +18,6 @@ package org.axonframework.modelling.command.inspection;
 
 import org.axonframework.commandhandling.CommandMessage;
 import org.axonframework.commandhandling.NoHandlerForCommandException;
-import org.axonframework.modelling.command.Aggregate;
-import org.axonframework.modelling.command.AggregateInvocationException;
-import org.axonframework.modelling.command.AggregateLifecycle;
-import org.axonframework.modelling.command.ApplyMore;
-import org.axonframework.modelling.command.Repository;
-import org.axonframework.modelling.command.RepositoryProvider;
 import org.axonframework.common.Assert;
 import org.axonframework.common.AxonConfigurationException;
 import org.axonframework.eventhandling.DomainEventMessage;
@@ -37,6 +31,12 @@ import org.axonframework.messaging.MetaData;
 import org.axonframework.messaging.annotation.MessageHandlingMember;
 import org.axonframework.messaging.unitofwork.CurrentUnitOfWork;
 import org.axonframework.messaging.unitofwork.UnitOfWork;
+import org.axonframework.modelling.command.Aggregate;
+import org.axonframework.modelling.command.AggregateInvocationException;
+import org.axonframework.modelling.command.AggregateLifecycle;
+import org.axonframework.modelling.command.ApplyMore;
+import org.axonframework.modelling.command.Repository;
+import org.axonframework.modelling.command.RepositoryProvider;
 
 import java.util.LinkedList;
 import java.util.List;
@@ -310,7 +310,7 @@ public class AnnotatedAggregate<T> extends AggregateLifecycle implements Aggrega
      * @return the last sequence of any event published, or {@code null} if no events have been published yet
      */
     public Long lastSequence() {
-        return lastKnownSequence == -1 ? null : lastKnownSequence;
+        return lastKnownSequence == null || lastKnownSequence == -1 ? null : lastKnownSequence;
     }
 
     @Override
@@ -409,14 +409,10 @@ public class AnnotatedAggregate<T> extends AggregateLifecycle implements Aggrega
     @SuppressWarnings("unchecked")
     private Object handle(CommandMessage<?> commandMessage) throws Exception {
         List<AnnotatedCommandHandlerInterceptor<? super T>> interceptors =
-                inspector.commandHandlerInterceptors()
-                         .stream()
-                         .filter(chi -> chi.canHandle(commandMessage))
-                         .sorted((chi1, chi2) -> Integer.compare(chi2.priority(), chi1.priority()))
+                inspector.commandHandlerInterceptors((Class<? extends T>) aggregateRoot.getClass())
                          .map(chi -> new AnnotatedCommandHandlerInterceptor<>(chi, aggregateRoot))
                          .collect(Collectors.toList());
-        MessageHandlingMember<? super T> handler = inspector.commandHandlers()
-                                                            .stream()
+        MessageHandlingMember<? super T> handler = inspector.commandHandlers((Class<? extends T>) aggregateRoot.getClass())
                                                             .filter(mh -> mh.canHandle(commandMessage))
                                                             .findFirst()
                                                             .orElseThrow(() -> new NoHandlerForCommandException(format("No handler available to handle command [%s]", commandMessage.getCommandName())));
@@ -430,11 +426,6 @@ public class AnnotatedAggregate<T> extends AggregateLifecycle implements Aggrega
                     interceptors,
                     m -> handler.handle(commandMessage, aggregateRoot)
             ).proceed();
-        }
-
-        if (aggregateRoot == null) {
-            aggregateRoot = (T) result;
-            return identifierAsString();
         }
         return result;
     }
@@ -480,14 +471,16 @@ public class AnnotatedAggregate<T> extends AggregateLifecycle implements Aggrega
      */
     protected <P> EventMessage<P> createMessage(P payload, MetaData metaData) {
         if (lastKnownSequence != null) {
+            String type = inspector.declaredType(rootType())
+                                   .orElse(rootType().getSimpleName());
             long seq = lastKnownSequence + 1;
             String id = identifierAsString();
             if (id == null) {
                 Assert.state(seq == 0,
                              () -> "The aggregate identifier has not been set. It must be set at the latest when applying the creation event");
-                return new LazyIdentifierDomainEventMessage<>(type(), seq, payload, metaData);
+                return new LazyIdentifierDomainEventMessage<>(type, seq, payload, metaData);
             }
-            return new GenericDomainEventMessage<>(type(), identifierAsString(), seq, payload, metaData);
+            return new GenericDomainEventMessage<>(type, identifierAsString(), seq, payload, metaData);
         }
         return new GenericEventMessage<>(payload, metaData);
     }

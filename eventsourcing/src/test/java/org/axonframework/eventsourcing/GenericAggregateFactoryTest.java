@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2010-2018. Axon Framework
+ * Copyright (c) 2010-2020. Axon Framework
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,11 +16,11 @@
 
 package org.axonframework.eventsourcing;
 
-import org.axonframework.eventsourcing.utils.MockException;
-import org.axonframework.eventsourcing.utils.StubAggregate;
 import org.axonframework.eventhandling.DomainEventMessage;
 import org.axonframework.eventhandling.GenericDomainEventMessage;
-import org.junit.jupiter.api.*;
+import org.axonframework.eventsourcing.utils.MockException;
+import org.axonframework.eventsourcing.utils.StubAggregate;
+import org.junit.jupiter.api.Test;
 
 import java.util.UUID;
 
@@ -57,6 +57,19 @@ class GenericAggregateFactoryTest {
         assertSame(aggregate, factory.createAggregateRoot(aggregate.getIdentifier(), snapshotMessage));
     }
 
+    /**
+     * Verify that {@link GenericAggregateFactory#doCreateAggregate} is not called unnecessarily.
+     */
+    @Test
+    void testInitializeFromAggregateSnapshot_AvoidCallingDoCreateAggregate() {
+        StubAggregate aggregate = new StubAggregate("stubId");
+        DomainEventMessage<StubAggregate> snapshotMessage = new GenericDomainEventMessage<>("type",
+                aggregate.getIdentifier(),
+                2, aggregate);
+        AggregateFactory<StubAggregate> factory = new RogueAggregateFactory(StubAggregate.class);
+        assertSame(aggregate, factory.createAggregateRoot(aggregate.getIdentifier(), snapshotMessage));
+    }
+
     private static class UnsuitableAggregate {
 
         private UnsuitableAggregate(Object uuid) {
@@ -70,5 +83,17 @@ class GenericAggregateFactoryTest {
         }
 
     }
+
+    private static class RogueAggregateFactory extends GenericAggregateFactory<StubAggregate> {
+        public RogueAggregateFactory(Class<StubAggregate> aggregateType) {
+            super(aggregateType);
+        }
+
+        @Override
+        protected StubAggregate doCreateAggregate(String aggregateIdentifier, DomainEventMessage firstEvent) {
+            throw new AssertionError("Forced error");
+        }
+    }
+
 
 }

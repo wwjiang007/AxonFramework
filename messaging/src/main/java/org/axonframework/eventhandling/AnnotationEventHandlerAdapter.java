@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2010-2018. Axon Framework
+ * Copyright (c) 2010-2020. Axon Framework
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,11 +16,20 @@
 
 package org.axonframework.eventhandling;
 
-import org.axonframework.messaging.annotation.*;
+import org.axonframework.eventhandling.replay.GenericResetContext;
+import org.axonframework.eventhandling.replay.ResetContext;
+import org.axonframework.messaging.annotation.AnnotatedHandlerInspector;
+import org.axonframework.messaging.annotation.ClasspathHandlerDefinition;
+import org.axonframework.messaging.annotation.ClasspathParameterResolverFactory;
+import org.axonframework.messaging.annotation.HandlerDefinition;
+import org.axonframework.messaging.annotation.MessageHandlerInterceptorMemberChain;
+import org.axonframework.messaging.annotation.MessageHandlingMember;
+import org.axonframework.messaging.annotation.ParameterResolverFactory;
+
+import java.util.Optional;
 
 /**
- * Adapter that turns any bean with {@link EventHandler} annotated methods into an {@link
- * EventMessageHandler}.
+ * Adapter that turns any bean with {@link EventHandler} annotated methods into an {@link EventMessageHandler}.
  *
  * @author Allard Buijze
  * @see EventMessageHandler
@@ -42,8 +51,8 @@ public class AnnotationEventHandlerAdapter implements EventMessageHandler {
     }
 
     /**
-     * Wraps the given {@code annotatedEventListener}, allowing it to be subscribed to an Event Bus. The given
-     * {@code parameterResolverFactory} is used to resolve parameter values for handler methods.
+     * Wraps the given {@code annotatedEventListener}, allowing it to be subscribed to an Event Bus. The given {@code
+     * parameterResolverFactory} is used to resolve parameter values for handler methods.
      *
      * @param annotatedEventListener   the annotated event listener
      * @param parameterResolverFactory the strategy for resolving handler method parameter values
@@ -76,27 +85,27 @@ public class AnnotationEventHandlerAdapter implements EventMessageHandler {
 
     @Override
     public Object handle(EventMessage<?> event) throws Exception {
-        for (MessageHandlingMember<? super Object> handler : inspector.getHandlers()) {
-            if (handler.canHandle(event)) {
-                return handler.handle(event, annotatedEventListener);
-            }
+        Optional<MessageHandlingMember<? super Object>> handler =
+                inspector.getHandlers(listenerType)
+                         .filter(h -> h.canHandle(event))
+                         .findFirst();
+        if (handler.isPresent()) {
+            MessageHandlerInterceptorMemberChain<Object> interceptor = inspector.chainedInterceptor(listenerType);
+            return interceptor.handle(event, annotatedEventListener, handler.get());
         }
         return null;
     }
 
     @Override
     public boolean canHandle(EventMessage<?> event) {
-        for (MessageHandlingMember<? super Object> handler : inspector.getHandlers()) {
-            if (handler.canHandle(event)) {
-                return true;
-            }
-        }
-        return false;
+        return inspector.getHandlers(listenerType)
+                        .anyMatch(h -> h.canHandle(event));
     }
 
     @Override
     public boolean canHandleType(Class<?> payloadType) {
-        return inspector.getHandlers().stream().anyMatch(handler -> handler.canHandleType(payloadType));
+        return inspector.getHandlers(listenerType)
+                        .anyMatch(handler -> handler.canHandleType(payloadType));
     }
 
     @Override
@@ -106,8 +115,20 @@ public class AnnotationEventHandlerAdapter implements EventMessageHandler {
 
     @Override
     public void prepareReset() {
+        prepareReset(null);
+    }
+
+    @Override
+    public <R> void prepareReset(R resetContext) {
         try {
-            handle(GenericEventMessage.asEventMessage(new ResetTriggeredEvent()));
+            ResetContext<?> resetMessage = GenericResetContext.asResetContext(resetContext);
+            Optional<MessageHandlingMember<? super Object>> handler =
+                    inspector.getHandlers(listenerType)
+                             .filter(h -> h.canHandle(resetMessage))
+                             .findFirst();
+            if (handler.isPresent()) {
+                handler.get().handle(resetMessage, annotatedEventListener);
+            }
         } catch (Exception e) {
             throw new ResetNotSupportedException("An Error occurred while notifying handlers of the reset", e);
         }

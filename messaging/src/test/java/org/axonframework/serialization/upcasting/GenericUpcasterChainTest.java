@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2010-2018. Axon Framework
+ * Copyright (c) 2010-2020. Axon Framework
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,7 +16,7 @@
 
 package org.axonframework.serialization.upcasting;
 
-import org.junit.Test;
+import org.junit.jupiter.api.*;
 
 import java.util.Arrays;
 import java.util.List;
@@ -26,15 +26,17 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Stream;
 
 import static java.util.stream.Collectors.toList;
-import static org.junit.Assert.assertEquals;
+import static org.junit.jupiter.api.Assertions.*;
 
 /**
+ * Test class validating the {@link GenericUpcasterChain}.
+ *
  * @author Rene de Waele
  */
-public class GenericUpcasterChainTest {
+class GenericUpcasterChainTest {
 
     @Test
-    public void testChainWithSingleUpcasterCanUpcastMultipleEvents() {
+    void testChainWithSingleUpcasterCanUpcastMultipleEvents() {
         Object a = "a", b = "b", c = "c";
         Upcaster<Object> testSubject = new GenericUpcasterChain<>(new AToBUpcaster(a, b));
         Stream<Object> result = testSubject.upcast(Stream.of(a, b, a, c));
@@ -42,7 +44,7 @@ public class GenericUpcasterChainTest {
     }
 
     @Test
-    public void testUpcastingResultOfOtherUpcaster() {
+    void testUpcastingResultOfOtherUpcaster() {
         Object a = "a", b = "b", c = "c";
         Upcaster<Object> testSubject = new GenericUpcasterChain<>(new AToBUpcaster(a, b), new AToBUpcaster(b, c));
         Stream<Object> result = testSubject.upcast(Stream.of(a, b, a, c));
@@ -50,7 +52,7 @@ public class GenericUpcasterChainTest {
     }
 
     @Test
-    public void testUpcastingResultOfOtherUpcasterOnlyWorksIfUpcastersAreInCorrectOrder() {
+    void testUpcastingResultOfOtherUpcasterOnlyWorksIfUpcastersAreInCorrectOrder() {
         Object a = "a", b = "b", c = "c";
         Upcaster<Object> testSubject = new GenericUpcasterChain<>(new AToBUpcaster(b, c), new AToBUpcaster(a, b));
         Stream<Object> result = testSubject.upcast(Stream.of(a, b, a, c));
@@ -58,7 +60,7 @@ public class GenericUpcasterChainTest {
     }
 
     @Test
-    public void testRemainderAddedAndUpcasted() {
+    void testRemainderAddedAndUpcasted() {
         Object a = "a", b = "b", c = "c";
         Upcaster<Object> testSubject =
                 new GenericUpcasterChain<>(new UpcasterWithRemainder(a, b), new AToBUpcaster(b, c));
@@ -67,7 +69,7 @@ public class GenericUpcasterChainTest {
     }
 
     @Test
-    public void testRemainderReleasedAfterUpcasting() {
+    void testRemainderReleasedAfterUpcasting() {
         Object a = "a", b = "b", c = "c", d = "d";
         Upcaster<Object> testSubject =
                 new GenericUpcasterChain<>(new ConditionalUpcaster(a, b, c), new ConditionalUpcaster(c, d, a));
@@ -76,7 +78,7 @@ public class GenericUpcasterChainTest {
     }
 
     @Test
-    public void testUpcastToMultipleTypes() {
+    void testUpcastToMultipleTypes() {
         Object a = "a", b = "b", c = "c";
         Upcaster<Object> testSubject = new GenericUpcasterChain<>(new MultipleTypesUpcaster(), new AToBUpcaster(b, c));
         Stream<Object> result = testSubject.upcast(Stream.of(a, b, c));
@@ -84,6 +86,7 @@ public class GenericUpcasterChainTest {
     }
 
     private static class AToBUpcaster extends SingleEntryUpcaster<Object> {
+
         private final Object a, b;
 
         private AToBUpcaster(Object a, Object b) {
@@ -136,16 +139,17 @@ public class GenericUpcasterChainTest {
                                                  return Stream.of(replacement);
                                              }
                                              return Optional.ofNullable(previous.getAndSet(null))
-                                                     .map(cached -> Stream.of(cached, entry)).orElse(Stream.of(entry));
+                                                            .map(cached -> Stream.of(cached, entry)).orElse(Stream.of(
+                                                             entry));
                                          }), Stream.generate(previous::get).limit(1).filter(Objects::nonNull));
         }
     }
 
     private static class MultipleTypesUpcaster implements Upcaster<Object> {
+
         @Override
         public Stream<Object> upcast(Stream<Object> intermediateRepresentations) {
             return intermediateRepresentations.flatMap(entry -> Stream.of(entry, entry));
         }
     }
-
 }

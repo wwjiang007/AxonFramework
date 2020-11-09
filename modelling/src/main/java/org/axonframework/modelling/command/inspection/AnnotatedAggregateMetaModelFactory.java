@@ -1,11 +1,11 @@
 /*
- * Copyright (c) 2010-2019. Axon Framework
+ * Copyright (c) 2010-2020. Axon Framework
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *     http://www.apache.org/licenses/LICENSE-2.0
+ *    http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -17,29 +17,59 @@
 package org.axonframework.modelling.command.inspection;
 
 import org.axonframework.commandhandling.CommandMessageHandlingMember;
-import org.axonframework.common.AxonConfigurationException;
 import org.axonframework.common.IdentifierValidator;
 import org.axonframework.common.ReflectionUtils;
 import org.axonframework.common.annotation.AnnotationUtils;
 import org.axonframework.eventhandling.EventMessage;
 import org.axonframework.messaging.Message;
-import org.axonframework.messaging.annotation.*;
+import org.axonframework.messaging.annotation.AnnotatedHandlerInspector;
+import org.axonframework.messaging.annotation.ClasspathHandlerDefinition;
+import org.axonframework.messaging.annotation.ClasspathParameterResolverFactory;
+import org.axonframework.messaging.annotation.HandlerDefinition;
+import org.axonframework.messaging.annotation.MessageHandlerInvocationException;
+import org.axonframework.messaging.annotation.MessageHandlingMember;
+import org.axonframework.messaging.annotation.ParameterResolverFactory;
 import org.axonframework.modelling.command.AggregateRoot;
 import org.axonframework.modelling.command.AggregateVersion;
 import org.axonframework.modelling.command.EntityId;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
+import java.lang.invoke.MethodHandles;
+import java.lang.reflect.AccessibleObject;
+import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
-import java.util.*;
+import java.lang.reflect.Member;
+import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.ServiceLoader;
+import java.util.Set;
+import java.util.SortedSet;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.locks.ReentrantReadWriteLock;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 import static java.lang.String.format;
+import static java.util.stream.Collectors.toList;
+import static org.axonframework.common.ListUtils.distinct;
+import static org.axonframework.common.annotation.AnnotationUtils.findAnnotationAttributes;
 
 /**
- * AggregateMetaModelFactory implementation that uses annotations on the target aggregate's members to build up the
- * meta model of the aggregate.
+ * AggregateMetaModelFactory implementation that uses annotations on the target aggregate's members to build up the meta
+ * model of the aggregate.
+ *
+ * @author Allard Buijze
+ * @since 3.1
  */
 public class AnnotatedAggregateMetaModelFactory implements AggregateMetaModelFactory {
+
+    private static final Logger logger = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
 
     private final Map<Class<?>, AnnotatedAggregateModel> registry;
     private final ParameterResolverFactory parameterResolverFactory;
@@ -57,15 +87,29 @@ public class AnnotatedAggregateMetaModelFactory implements AggregateMetaModelFac
     }
 
     /**
+     * Shorthand to create a factory instance and inspect the model for the given {@code aggregateType} and its {@code
+     * subtypes}.
+     *
+     * @param aggregateType The class of the aggregate to create the model for
+     * @param subtypes      Subtypes of this aggregate class
+     * @param <T>           The type of aggregate described in the model
+     * @return The model describing the structure of the aggregate
+     */
+    public static <T> AggregateModel<T> inspectAggregate(Class<T> aggregateType, Set<Class<? extends T>> subtypes) {
+        return new AnnotatedAggregateMetaModelFactory().createModel(aggregateType, subtypes);
+    }
+
+    /**
      * Shorthand to create a factory instance and inspect the model for the given {@code aggregateType}, using given
      * {@code parameterResolverFactory} to resolve parameter values for annotated handlers.
      *
-     * @param aggregateType            The class of the aggregate to create the model for
+     * @param aggregateType            the class of the aggregate to create the model for
      * @param parameterResolverFactory to resolve parameter values of annotated handlers with
-     * @param <T>                      The type of aggregate described in the model
-     * @return The model describing the structure of the aggregate
+     * @param <T>                      the type of aggregate described in the model
+     * @return the model describing the structure of the aggregate
      */
-    public static <T> AggregateModel<T> inspectAggregate(Class<T> aggregateType, ParameterResolverFactory parameterResolverFactory) {
+    public static <T> AggregateModel<T> inspectAggregate(Class<T> aggregateType,
+                                                         ParameterResolverFactory parameterResolverFactory) {
         return new AnnotatedAggregateMetaModelFactory(parameterResolverFactory).createModel(aggregateType);
     }
 
@@ -88,6 +132,26 @@ public class AnnotatedAggregateMetaModelFactory implements AggregateMetaModelFac
     }
 
     /**
+     * Shorthand to create a factory instance and inspect the model for the given {@code aggregateType} and its {@code
+     * subytpes}, using given {@code parameterResolverFactory} to resolve parameter values for annotated handlers and
+     * {@code handlerDefinition} to create concrete handlers.
+     *
+     * @param aggregateType            The class of the aggregate to create the model for
+     * @param parameterResolverFactory to resolve parameter values of annotated handlers with
+     * @param handlerDefinition        The handler definition used to create concrete handlers
+     * @param subtypes                 Subtypes of this aggregate class
+     * @param <T>                      The type of aggregate described in the model
+     * @return The model describing the structure of the aggregate
+     */
+    public static <T> AggregateModel<T> inspectAggregate(Class<T> aggregateType,
+                                                         ParameterResolverFactory parameterResolverFactory,
+                                                         HandlerDefinition handlerDefinition,
+                                                         Set<Class<? extends T>> subtypes) {
+        return new AnnotatedAggregateMetaModelFactory(parameterResolverFactory, handlerDefinition)
+                .createModel(aggregateType, subtypes);
+    }
+
+    /**
      * Initializes an instance which uses the default, classpath based, ParameterResolverFactory to detect parameters
      * for annotated handlers.
      */
@@ -96,8 +160,8 @@ public class AnnotatedAggregateMetaModelFactory implements AggregateMetaModelFac
     }
 
     /**
-     * Initializes an instance which uses the given {@code parameterResolverFactory} to detect parameters for
-     * annotated handlers.
+     * Initializes an instance which uses the given {@code parameterResolverFactory} to detect parameters for annotated
+     * handlers.
      *
      * @param parameterResolverFactory to resolve parameter values of annotated handlers with
      */
@@ -107,8 +171,8 @@ public class AnnotatedAggregateMetaModelFactory implements AggregateMetaModelFac
     }
 
     /**
-     * Initializes an instance which uses the given {@code parameterResolverFactory} to detect parameters for
-     * annotated handlers and {@code handlerDefinition} to create concrete handlers.
+     * Initializes an instance which uses the given {@code parameterResolverFactory} to detect parameters for annotated
+     * handlers and {@code handlerDefinition} to create concrete handlers.
      *
      * @param parameterResolverFactory to resolve parameter values of annotated handlers with
      * @param handlerDefinition        The handler definition used to create concrete handlers
@@ -121,12 +185,13 @@ public class AnnotatedAggregateMetaModelFactory implements AggregateMetaModelFac
     }
 
     @Override
-    public <T> AnnotatedAggregateModel<T> createModel(Class<? extends T> aggregateType) {
-
+    public <T> AnnotatedAggregateModel<T> createModel(Class<? extends T> aggregateType,
+                                                      Set<Class<? extends T>> subtypes) {
         if (!registry.containsKey(aggregateType)) {
             AnnotatedHandlerInspector<T> inspector = AnnotatedHandlerInspector.inspectType(aggregateType,
                                                                                            parameterResolverFactory,
-                                                                                           handlerDefinition);
+                                                                                           handlerDefinition,
+                                                                                           subtypes);
             AnnotatedAggregateModel<T> model = new AnnotatedAggregateModel<>(aggregateType, inspector);
             // Add the newly created inspector to the registry first to prevent a StackOverflowError:
             // another call to createInspector with the same inspectedType will return this instance of the inspector.
@@ -139,104 +204,318 @@ public class AnnotatedAggregateMetaModelFactory implements AggregateMetaModelFac
 
     private class AnnotatedAggregateModel<T> implements AggregateModel<T> {
 
+        private static final String JAVAX_PERSISTENCE_ID = "javax.persistence.Id";
+
         private final Class<? extends T> inspectedType;
         private final List<ChildEntity<T>> children;
         private final AnnotatedHandlerInspector<T> handlerInspector;
-        private final List<MessageHandlingMember<? super T>> commandHandlerInterceptors;
-        private final List<MessageHandlingMember<? super T>> commandHandlers;
-        private final List<MessageHandlingMember<? super T>> eventHandlers;
-        private final ReentrantReadWriteLock lock = new ReentrantReadWriteLock();
+        private final Map<Class<?>, List<MessageHandlingMember<? super T>>> allCommandHandlerInterceptors;
+        private final Map<Class<?>, List<MessageHandlingMember<? super T>>> allCommandHandlers;
+        private final Map<Class<?>, List<MessageHandlingMember<? super T>>> allEventHandlers;
 
-        private String aggregateType;
-        private Field identifierField;
-        private Field versionField;
+        private final Map<String, Class<?>> types;
+        private final Map<Class<?>, String> declaredTypes;
+        private Member identifierMember;
+        private Member versionMember;
         private String routingKey;
         private final ThreadLocal<Boolean> initializing = new ThreadLocal<>();
         private volatile boolean initialized;
 
-        public AnnotatedAggregateModel(Class<? extends T> aggregateType, AnnotatedHandlerInspector<T> handlerInspector) {
+        public AnnotatedAggregateModel(Class<? extends T> aggregateType,
+                                       AnnotatedHandlerInspector<T> handlerInspector) {
             this.inspectedType = aggregateType;
-            this.commandHandlerInterceptors = new ArrayList<>();
-            this.commandHandlers = new ArrayList<>();
-            this.eventHandlers = new ArrayList<>();
+            this.types = new HashMap<>();
+            this.declaredTypes = new HashMap<>();
+            this.allCommandHandlerInterceptors = new HashMap<>();
+            this.allCommandHandlers = new HashMap<>();
+            this.allEventHandlers = new HashMap<>();
             this.children = new ArrayList<>();
             this.handlerInspector = handlerInspector;
         }
 
         private void initialize() {
             initializing.set(Boolean.TRUE);
-            inspectAggregateType();
-            inspectFields();
+            inspectFieldsAndMethods();
             prepareHandlers();
+            inspectAggregateTypes();
             initialized = true;
             initializing.remove();
         }
 
-        @SuppressWarnings("unchecked")
         private void prepareHandlers() {
-            for (MessageHandlingMember<? super T> handler : handlerInspector.getHandlers()) {
-                if (handler.unwrap(CommandMessageHandlingMember.class).isPresent()) {
-                    commandHandlers.add(handler);
-                } else if (handler.unwrap(CommandHandlerInterceptorHandlingMember.class).isPresent()) {
-                    commandHandlerInterceptors.add(handler);
-                } else {
-                    eventHandlers.add(handler);
+            for (Map.Entry<Class<?>, SortedSet<MessageHandlingMember<? super T>>> handlersPerType
+                    : handlerInspector.getAllHandlers().entrySet()) {
+                Class<?> type = handlersPerType.getKey();
+                for (MessageHandlingMember<? super T> handler : handlersPerType.getValue()) {
+                    if (handler.unwrap(CommandMessageHandlingMember.class).isPresent()) {
+                        if (Modifier.isAbstract(type.getModifiers()) && handler.unwrap(Constructor.class).isPresent()) {
+                            throw new AggregateModellingException(format(
+                                    "An abstract aggregate %s cannot have @CommandHandler on constructor.",
+                                    type));
+                        }
+                        addHandler(allCommandHandlers, type, handler);
+                    } else {
+                        addHandler(allEventHandlers, type, handler);
+                    }
+                }
+            }
+            for (Map.Entry<Class<?>, SortedSet<MessageHandlingMember<? super T>>> interceptorsPerType : handlerInspector.getAllInterceptors().entrySet()) {
+                Class<?> type = interceptorsPerType.getKey();
+                for (MessageHandlingMember<? super T> handler : interceptorsPerType.getValue()) {
+                    addHandler(allCommandHandlerInterceptors, type, handler);
+                }
+            }
+            validateCommandHandlers();
+        }
+
+        private void addHandler(Map<Class<?>, List<MessageHandlingMember<? super T>>> handlers, Class<?> type,
+                                MessageHandlingMember<? super T> handler) {
+            handlers.computeIfAbsent(type, t -> new ArrayList<>())
+                    .add(handler);
+        }
+
+        /**
+         * In polymorphic aggregate hierarchy there must not be more than one creational (factory) command handler (of
+         * the same command name) in more than one aggregate.
+         */
+        private void validateCommandHandlers() {
+            List<List<MessageHandlingMember<? super T>>> handlers = new ArrayList<>(allCommandHandlers.values());
+            for (int i = 0; i < handlers.size() - 1; i++) {
+                List<CommandMessageHandlingMember<? super T>> factoryCommands1 = factoryCommands(handlers.get(i));
+                List<CommandMessageHandlingMember<? super T>> factoryCommands2 = factoryCommands(handlers.get(i + 1));
+                for (CommandMessageHandlingMember<? super T> handler1 : factoryCommands1) {
+                    for (CommandMessageHandlingMember<? super T> handler2 : factoryCommands2) {
+                        String commandName1 = handler1.commandName();
+                        String commandName2 = handler2.commandName();
+                        if (commandName1.equals(commandName2)) {
+                            Class<?> declaringClass1 = handler1.declaringClass();
+                            Class<?> declaringClass2 = handler2.declaringClass();
+                            if (!declaringClass1.equals(declaringClass2)) {
+                                throw new AggregateModellingException(format(
+                                        "Aggregates %s and %s have the same creation @CommandHandler %s",
+                                        declaringClass1,
+                                        declaringClass2,
+                                        commandName1));
+                            }
+                        }
+                    }
                 }
             }
         }
 
-        private void inspectAggregateType() {
-            aggregateType = AnnotationUtils.findAnnotationAttributes(inspectedType, AggregateRoot.class)
-                                           .map(map -> (String) map.get("type")).filter(i -> i.length() > 0).orElse(inspectedType.getSimpleName());
+        @SuppressWarnings("unchecked")
+        private List<CommandMessageHandlingMember<? super T>> factoryCommands(
+                List<MessageHandlingMember<? super T>> handlers) {
+            return handlers.stream()
+                           .map(h -> h.unwrap(CommandMessageHandlingMember.class))
+                           .filter(Optional::isPresent)
+                           .map(Optional::get)
+                           .filter(CommandMessageHandlingMember::isFactoryHandler)
+                           .map(h -> (CommandMessageHandlingMember<? super T>) h)
+                           .collect(toList());
         }
 
-        private void inspectFields() {
+        private void inspectAggregateTypes() {
+            for (Class<?> type : handlerInspector.getAllHandlers().keySet()) {
+                String declaredType = findDeclaredType(type);
+                types.put(declaredType, type);
+                declaredTypes.put(type, declaredType);
+            }
+        }
+
+        private String findDeclaredType(Class<?> type) {
+            return findAnnotationAttributes(type, AggregateRoot.class)
+                    .map(map -> (String) map.get("type")).filter(i -> i.length() > 0)
+                    .orElse(type.getSimpleName());
+        }
+
+        private void inspectFieldsAndMethods() {
             ServiceLoader<ChildEntityDefinition> childEntityDefinitions =
                     ServiceLoader.load(ChildEntityDefinition.class, inspectedType.getClassLoader());
-            for (Field field : ReflectionUtils.fieldsOf(inspectedType)) {
-                childEntityDefinitions.forEach(def -> def.createChildDefinition(field, this).ifPresent(child -> {
-                    children.add(child);
-                    commandHandlers.addAll(child.commandHandlers());
-                }));
-
-                AnnotationUtils.findAnnotationAttributes(field, EntityId.class).ifPresent(attributes -> {
-                    identifierField = field;
-                    if (!"".equals(attributes.get("routingKey"))) {
-                        routingKey = (String) attributes.get("routingKey");
-                    } else {
-                        routingKey = field.getName();
-                    }
-                });
-                if (identifierField == null) {
-                    AnnotationUtils.findAnnotationAttributes(field, "javax.persistence.Id").ifPresent(a -> {
-                        identifierField = field;
-                        routingKey = field.getName();
+            List<Member> entityIdMembers = new ArrayList<>();
+            List<Member> persistenceIdMembers = new ArrayList<>();
+            List<Member> aggregateVersionMembers = new ArrayList<>();
+            for (Class<?> handlerType : handlerInspector.getAllHandlers().keySet()) {
+                // Navigate fields for Axon related annotations
+                for (Field field : ReflectionUtils.fieldsOf(handlerType)) {
+                    createChildDefinitionsAndAddHandlers(childEntityDefinitions, handlerType, field);
+                    findAnnotationAttributes(field, EntityId.class).ifPresent(attributes -> entityIdMembers.add(field));
+                    findAnnotationAttributes(field, JAVAX_PERSISTENCE_ID).ifPresent(
+                            attributes -> persistenceIdMembers.add(field)
+                    );
+                    findAnnotationAttributes(field, AggregateVersion.class).ifPresent(
+                            attributes -> aggregateVersionMembers.add(field)
+                    );
+                }
+                // Navigate methods for Axon related annotations
+                for (Method method : ReflectionUtils.methodsOf(handlerType)) {
+                    createChildDefinitionsAndAddHandlers(childEntityDefinitions, handlerType, method);
+                    findAnnotationAttributes(method, EntityId.class).ifPresent(attributes -> {
+                        assertValidValueProvidingMethod(method, EntityId.class.getSimpleName());
+                        entityIdMembers.add(method);
+                    });
+                    findAnnotationAttributes(method, JAVAX_PERSISTENCE_ID).ifPresent(attributes -> {
+                        assertValidValueProvidingMethod(method, JAVAX_PERSISTENCE_ID);
+                        persistenceIdMembers.add(method);
+                    });
+                    findAnnotationAttributes(method, AggregateVersion.class).ifPresent(attributes -> {
+                        assertValidValueProvidingMethod(method, AggregateVersion.class.getSimpleName());
+                        aggregateVersionMembers.add(method);
                     });
                 }
-                if (identifierField != null) {
-                    final Class<?> idClazz = identifierField.getType();
-                    if (!IdentifierValidator.getInstance().isValidIdentifier(idClazz)) {
-                        throw new AxonConfigurationException(format("Aggregate identifier type [%s] should override Object.toString()", idClazz.getName()));
-                    }
+            }
+
+            findIdentifierMember(distinct(entityIdMembers), distinct(persistenceIdMembers))
+                    .ifPresent(this::setIdentifierAndRoutingKey);
+            setVersionMember(aggregateVersionMembers);
+            assertIdentifierValidity(identifierMember);
+        }
+
+        private void createChildDefinitionsAndAddHandlers(ServiceLoader<ChildEntityDefinition> childEntityDefinitions,
+                                                          Class<?> type,
+                                                          Member entityMember) {
+            childEntityDefinitions.forEach(
+                    definition -> definition.createChildDefinition(entityMember, this)
+                                            .ifPresent(child -> {
+                                                children.add(child);
+                                                child.commandHandlers().forEach(
+                                                        handler -> addHandler(allCommandHandlers, type, handler)
+                                                );
+                                            })
+            );
+        }
+
+        private void assertValidValueProvidingMethod(Method method, String annotationName) {
+            if (method.getParameterCount() != 0) {
+                throw new AggregateModellingException(format(
+                        "Aggregate [%s] has an [%s] annotated method [%s] with parameters, "
+                                + "whilst none are allowed on such a method.",
+                        inspectedType, annotationName, method
+                ));
+            }
+            if (method.getReturnType() == Void.TYPE) {
+                throw new AggregateModellingException(format(
+                        "Aggregate [%s] has an [%s] annotated method [%s] with void return type, "
+                                + "whilst a return value is required for such a method.",
+                        inspectedType, annotationName, method
+                ));
+            }
+        }
+
+        private Optional<Member> findIdentifierMember(List<Member> entityIdMembers,
+                                                      List<Member> persistenceIdMembers) {
+            if (entityIdMembers.size() > 1) {
+                throw new AggregateModellingException(format(
+                        "Aggregate [%s] has more than one identifier member, while only a single member is allowed.",
+                        inspectedType
+                ));
+            }
+            if (!entityIdMembers.isEmpty()) {
+                return Optional.of(entityIdMembers.get(0));
+            } else if (!persistenceIdMembers.isEmpty()) {
+                return Optional.of(persistenceIdMembers.get(0));
+            }
+            return Optional.empty();
+        }
+
+        private void setIdentifierAndRoutingKey(Member identifier) {
+            identifierMember = identifier;
+            routingKey = findRoutingKey((AccessibleObject) identifier).orElseGet(
+                    () -> getMemberIdentifierName(identifier)
+            );
+        }
+
+        private Optional<String> findRoutingKey(AccessibleObject accessibleObject) {
+            return AnnotationUtils.<String>findAnnotationAttribute(accessibleObject, EntityId.class, "routingKey")
+                    .filter(key -> !"".equals(key));
+        }
+
+        /**
+         * Return the given {@code identifierMember}'s {@link Member#getName()}. If the given {@code identifierMember}
+         * is of type {@link Method} and it resembles a regular getter method, the {@code "get"} will be stripped off.
+         *
+         * @param identifierMember the {@link Member} to retrieve the name for
+         * @return the identifier name tied to the given {@code identifierMember}
+         */
+        private String getMemberIdentifierName(Member identifierMember) {
+            String identifierName = identifierMember.getName();
+            return identifierMember instanceof Method && isGetterByConvention(identifierName)
+                    ? stripGetterConvention(identifierName)
+                    : identifierName;
+        }
+
+        private boolean isGetterByConvention(String identifierName) {
+            return identifierName.startsWith("get")
+                    && identifierName.length() >= 4
+                    && Character.isUpperCase(identifierName.charAt(3));
+        }
+
+        private String stripGetterConvention(String identifierName) {
+            return identifierName.substring(3, 4).toLowerCase() + identifierName.substring(4);
+        }
+
+        private void setVersionMember(List<Member> versionMembers) {
+            if (versionMembers.isEmpty()) {
+                logger.debug("No @AggregateVersion annotated Member found.");
+                return;
+            }
+            if (versionMembers.size() > 1) {
+                String versionMembersString = versionMembers.stream()
+                                                            .map(Member::getName)
+                                                            .collect(Collectors.joining(", "));
+                throw new AggregateModellingException(format(
+                        "Aggregate [%s] has two or more @AggregateVersion annotated members, "
+                                + "whilst only a single member is allowed.\n "
+                                + "The following version members have been found: %s",
+                        inspectedType, versionMembersString
+                ));
+            }
+
+            logger.debug(
+                    "@AggregateVersion annotated Member [{}] has been found and set as the [{}] Aggregate Version.",
+                    versionMembers.get(0).getName(), inspectedType
+            );
+            this.versionMember = versionMembers.get(0);
+        }
+
+        private void assertIdentifierValidity(Member identifier) {
+            if (identifier != null) {
+                final Class<?> idClazz = ReflectionUtils.getMemberValueType(identifier);
+                if (!IdentifierValidator.getInstance().isValidIdentifier(idClazz)) {
+                    throw new AggregateModellingException(format(
+                            "Aggregate identifier type [%s] should override Object.toString()",
+                            idClazz.getName()
+                    ));
                 }
-                AnnotationUtils.findAnnotationAttributes(field, AggregateVersion.class)
-                               .ifPresent(attributes -> versionField = field);
             }
         }
 
         @SuppressWarnings("unchecked")
         private AnnotatedAggregateModel<T> runtimeModelOf(T target) {
-            return modelOf((Class<T>) target.getClass());
+            return modelOf((Class<? extends T>) target.getClass());
         }
 
         @Override
-        public List<MessageHandlingMember<? super T>> commandHandlers() {
-            return Collections.unmodifiableList(commandHandlers);
+        public Map<Class<?>, List<MessageHandlingMember<? super T>>> allCommandHandlers() {
+            return Collections.unmodifiableMap(allCommandHandlers);
         }
 
         @Override
-        public <C> AnnotatedAggregateModel<C> modelOf(Class<? extends C> entityType) {
-            return AnnotatedAggregateMetaModelFactory.this.createModel(entityType);
+        public Stream<MessageHandlingMember<? super T>> commandHandlers(Class<? extends T> subtype) {
+            return handlers(allCommandHandlers, subtype);
+        }
+
+        @Override
+        public Stream<Class<?>> types() {
+            return handlerInspector.getAllHandlers()
+                                   .keySet()
+                                   .stream();
+        }
+
+        @Override
+        public <C> AnnotatedAggregateModel<C> modelOf(Class<? extends C> childEntityType) {
+            // using empty list subtypes because this model is already in the registry, so it doesn't matter
+            return AnnotatedAggregateMetaModelFactory.this.createModel(childEntityType, Collections.emptySet());
         }
 
         @Override
@@ -252,9 +531,10 @@ public class AnnotatedAggregateMetaModelFactory implements AggregateMetaModelFac
         }
 
         private void doPublish(EventMessage<?> message, T target) {
-            getHandler(message).ifPresent(h -> {
+            getHandler(message, target.getClass()).ifPresent(h -> {
                 try {
-                    h.handle(message, target);
+                    handlerInspector.chainedInterceptor(target.getClass())
+                                    .handle(message, target, h);
                 } catch (Exception e) {
                     throw new MessageHandlerInvocationException(
                             format("Error handling event of type [%s] in aggregate", message.getPayloadType()), e);
@@ -265,47 +545,73 @@ public class AnnotatedAggregateMetaModelFactory implements AggregateMetaModelFac
 
         @Override
         public String type() {
-            return aggregateType;
+            return declaredTypes.get(inspectedType);
+        }
+
+        @Override
+        public Optional<Class<?>> type(String declaredType) {
+            return Optional.ofNullable(types.getOrDefault(declaredType, null));
+        }
+
+        @Override
+        public Optional<String> declaredType(Class<?> type) {
+            return Optional.ofNullable(declaredTypes.getOrDefault(type, null));
         }
 
         @Override
         public Long getVersion(T target) {
-            if (versionField != null) {
-                return (Long) ReflectionUtils.getFieldValue(versionField, target);
-            }
-            return null;
+            return versionMember != null ? ReflectionUtils.<Long>getMemberValue(versionMember, target) : null;
         }
 
         @Override
-        public List<MessageHandlingMember<? super T>> commandHandlerInterceptors() {
-            return Collections.unmodifiableList(commandHandlerInterceptors);
+        public Map<Class<?>, List<MessageHandlingMember<? super T>>> allCommandHandlerInterceptors() {
+            return Collections.unmodifiableMap(allCommandHandlerInterceptors);
+        }
+
+        @Override
+        public Stream<MessageHandlingMember<? super T>> commandHandlerInterceptors(Class<? extends T> subtype) {
+            return handlers(allCommandHandlerInterceptors, subtype);
         }
 
         /**
-         * Returns the {@link MessageHandlingMember} that is capable of handling the given {@code message}. If no member is
-         * found an empty optional is returned.
+         * Returns the {@link MessageHandlingMember} that is capable of handling the given {@code message}. If no member
+         * is found an empty optional is returned.
          *
-         * @param message the message to find a handler for
+         * @param message     the message to find a handler for
+         * @param targetClass the target class that handler should be executed on
          * @return the handler of the message if present on the model
          */
-        @SuppressWarnings("unchecked")
-        protected Optional<MessageHandlingMember<? super T>> getHandler(Message<?> message) {
-            return eventHandlers.stream().filter(handler -> handler.canHandle(message)).findAny();
+        protected Optional<MessageHandlingMember<? super T>> getHandler(Message<?> message, Class<?> targetClass) {
+            return handlers(allEventHandlers, targetClass)
+                    .filter(handler -> handler.canHandle(message))
+                    .findFirst();
+        }
+
+        @Override
+        public Map<Class<?>, List<MessageHandlingMember<? super T>>> allEventHandlers() {
+            return Collections.unmodifiableMap(allEventHandlers);
+        }
+
+        //backwards compatibility - if you don't specify a designated child,
+        //you should at least get handlers of its first registered parent (if any)
+        private Stream<MessageHandlingMember<? super T>> handlers(
+                Map<Class<?>, List<MessageHandlingMember<? super T>>> handlers, Class<?> subtype) {
+            Class<?> type = subtype;
+            while (!handlers.containsKey(type) && !type.equals(Object.class)) {
+                type = type.getSuperclass();
+            }
+            return handlers.getOrDefault(type, Collections.emptyList()).stream();
         }
 
         @Override
         public Object getIdentifier(T target) {
-            if (identifierField != null) {
-                return ReflectionUtils.getFieldValue(identifierField, target);
-            }
-            return null;
+            return identifierMember != null ? ReflectionUtils.getMemberValue(identifierMember, target) : null;
         }
 
         @Override
         public String routingKey() {
             return routingKey;
         }
-
 
         /**
          * Returns this instance when it it safe to read from. This is either if the current thread is already

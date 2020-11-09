@@ -1,14 +1,34 @@
+/*
+ * Copyright (c) 2010-2020. Axon Framework
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package org.axonframework.common;
 
-import org.junit.*;
+import org.junit.jupiter.api.*;
 
 import java.util.Random;
 
-import static org.axonframework.common.BuilderUtils.assertThat;
 import static org.axonframework.common.BuilderUtils.*;
-import static org.junit.Assert.*;
+import static org.junit.jupiter.api.Assertions.*;
 
-public class BuilderUtilsTest {
+/**
+ * Test class validating all the methods in the {@link BuilderUtils}.
+ *
+ * @author Bert Laverman
+ */
+class BuilderUtilsTest {
 
     private static final int NUMBER_OF_RANDOM_NUMBERS = 256;
 
@@ -22,7 +42,7 @@ public class BuilderUtilsTest {
     }
 
     @Test
-    public void testAssertThat() {
+    void testAssertThat() {
         assertThat(0, n -> (n == 0), "Zero must be zero");
 
         testAssertFails(() -> assertThat(0, n -> n != 0, "Zero must be zero"),
@@ -30,15 +50,15 @@ public class BuilderUtilsTest {
     }
 
     @Test
-    public void testAssertNonNull() {
-        BuilderUtils.assertNonNull(this, "This is not null");
+    void testAssertNonNull() {
+        assertNonNull(this, "This is not null");
 
         testAssertFails(() -> assertNonNull(null, "Null should be null"),
                         "BuilderUtils.assertNonNull() should have failed on value null.");
     }
 
     @Test
-    public void testAssertPositiveInteger() {
+    void testAssertPositiveInteger() {
         // Fixed tests
         assertPositive(0, "Zero is positive");
         assertPositive(1, "One is also positive");
@@ -58,7 +78,7 @@ public class BuilderUtilsTest {
     }
 
     @Test
-    public void testAssertPositiveLong() {
+    void testAssertPositiveLong() {
         // Fixed tests
         assertPositive(0L, "Zero is positive");
         assertPositive(1L, "One is also positive");
@@ -78,7 +98,7 @@ public class BuilderUtilsTest {
     }
 
     @Test
-    public void testAssertStrictPositiveInteger() {
+    void testAssertStrictPositiveInteger() {
         // Fixed tests
         assertStrictPositive(1, "One is positive");
         testAssertFails(() -> assertStrictPositive(0, "Zero is not strict positive"),
@@ -99,7 +119,7 @@ public class BuilderUtilsTest {
     }
 
     @Test
-    public void testAssertStrictPositiveLong() {
+    void testAssertStrictPositiveLong() {
         // Fixed tests
         assertStrictPositive(1L, "One is also positive");
         testAssertFails(() -> assertStrictPositive(0L, "Zero is not strict positive"),
@@ -117,5 +137,14 @@ public class BuilderUtilsTest {
                 testAssertFails(() -> assertStrictPositive(value, "fail"), "Value " + value + " is negative.");
             }
         }
+    }
+
+    @Test
+    void testAssertNonEmpty() {
+        assertNonEmpty("some-text", "Reacts fine on some text");
+        testAssertFails(() -> assertNonEmpty(null, "Should fail on null"),
+                        "BuilderUtils.assertNonEmpty() should have failed on value null.");
+        testAssertFails(() -> assertNonEmpty("", "Should fail on an empty string"),
+                        "BuilderUtils.assertNonEmpty() should have failed on an empty string.");
     }
 }

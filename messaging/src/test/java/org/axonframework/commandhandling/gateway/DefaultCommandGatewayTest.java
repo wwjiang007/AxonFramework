@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2010-2018. Axon Framework
+ * Copyright (c) 2010-2020. Axon Framework
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,17 +16,22 @@
 
 package org.axonframework.commandhandling.gateway;
 
-import org.axonframework.commandhandling.*;
+import org.axonframework.commandhandling.CommandBus;
+import org.axonframework.commandhandling.CommandCallback;
+import org.axonframework.commandhandling.CommandExecutionException;
+import org.axonframework.commandhandling.CommandMessage;
+import org.axonframework.commandhandling.CommandResultMessage;
+import org.axonframework.commandhandling.GenericCommandMessage;
+import org.axonframework.commandhandling.GenericCommandResultMessage;
 import org.axonframework.messaging.MessageDispatchInterceptor;
 import org.axonframework.messaging.unitofwork.CurrentUnitOfWork;
 import org.axonframework.messaging.unitofwork.DefaultUnitOfWork;
 import org.axonframework.messaging.unitofwork.UnitOfWork;
 import org.axonframework.utils.MockException;
-import org.junit.Before;
-import org.junit.Test;
-import org.mockito.ArgumentCaptor;
-import org.mockito.invocation.InvocationOnMock;
-import org.mockito.stubbing.Answer;
+import org.junit.jupiter.api.*;
+import org.mockito.*;
+import org.mockito.invocation.*;
+import org.mockito.stubbing.*;
 
 import java.util.Collections;
 import java.util.HashMap;
@@ -39,23 +44,25 @@ import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.axonframework.commandhandling.GenericCommandResultMessage.asCommandResultMessage;
-import static org.junit.Assert.*;
+import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
 
 /**
+ * Test class validating the {@link DefaultCommandGateway}.
+ *
  * @author Allard Buijze
  * @author Nakul Mishra
  */
-public class DefaultCommandGatewayTest {
+class DefaultCommandGatewayTest {
 
     private DefaultCommandGateway testSubject;
     private CommandBus mockCommandBus;
     private RetryScheduler mockRetryScheduler;
-    private MessageDispatchInterceptor mockCommandMessageTransformer;
+    private MessageDispatchInterceptor<CommandMessage<?>> mockCommandMessageTransformer;
 
     @SuppressWarnings("unchecked")
-    @Before
-    public void setUp() {
+    @BeforeEach
+    void setUp() {
         mockCommandBus = mock(CommandBus.class);
         mockRetryScheduler = mock(RetryScheduler.class);
         mockCommandMessageTransformer = mock(MessageDispatchInterceptor.class);
@@ -68,23 +75,26 @@ public class DefaultCommandGatewayTest {
                                            .build();
     }
 
-    @SuppressWarnings({"unchecked", "serial"})
+    @SuppressWarnings({"unchecked"})
     @Test
-    public void testSendWithCallbackCommandIsRetried() {
+    void testSendWithCallbackCommandIsRetried() {
         doAnswer(invocation -> {
-            ((CommandCallback) invocation.getArguments()[1])
-                    .onResult((CommandMessage) invocation.getArguments()[0],
-                               asCommandResultMessage(new RuntimeException(new RuntimeException())));
+            ((CommandCallback<Object, Object>) invocation.getArguments()[1])
+                    .onResult((CommandMessage<Object>) invocation.getArguments()[0],
+                              asCommandResultMessage(new RuntimeException(new RuntimeException())));
             return null;
         }).when(mockCommandBus).dispatch(isA(CommandMessage.class), isA(CommandCallback.class));
         when(mockRetryScheduler.scheduleRetry(isA(CommandMessage.class), isA(RuntimeException.class), isA(List.class),
                                               isA(Runnable.class)))
                 .thenAnswer(new RescheduleCommand())
                 .thenReturn(false);
+        //noinspection rawtypes
         final AtomicReference<CommandResultMessage> actualResult = new AtomicReference<>();
         testSubject.send("Command",
-                         (CommandCallback<Object, Object>) (commandMessage, commandResultMessage) -> actualResult.set(commandResultMessage));
+                         (CommandCallback<Object, Object>) (commandMessage, commandResultMessage) -> actualResult
+                                 .set(commandResultMessage));
         verify(mockCommandMessageTransformer).handle(isA(CommandMessage.class));
+        //noinspection rawtypes
         ArgumentCaptor<List> captor = ArgumentCaptor.forClass(List.class);
         verify(mockRetryScheduler, times(2)).scheduleRetry(isA(CommandMessage.class), isA(RuntimeException.class),
                                                            captor.capture(), isA(Runnable.class));
@@ -96,13 +106,14 @@ public class DefaultCommandGatewayTest {
         assertEquals(2, ((Class<? extends Throwable>[]) captor.getValue().get(0)).length);
     }
 
-    @SuppressWarnings({"unchecked", "serial"})
+    @SuppressWarnings({"unchecked"})
     @Test
-    public void testSendWithoutCallbackCommandIsRetried() {
+    void testSendWithoutCallbackCommandIsRetried() {
         doAnswer(invocation -> {
-            ((CommandCallback) invocation.getArguments()[1])
-                    .onResult((CommandMessage) invocation.getArguments()[0],
-                               asCommandResultMessage(new RuntimeException(new RuntimeException())));
+            ((CommandCallback<Object, Object>) invocation.getArguments()[1]).onResult(
+                    (CommandMessage<Object>) invocation.getArguments()[0],
+                    asCommandResultMessage(new RuntimeException(new RuntimeException()))
+            );
             return null;
         }).when(mockCommandBus).dispatch(isA(CommandMessage.class), isA(CommandCallback.class));
         when(mockRetryScheduler.scheduleRetry(isA(CommandMessage.class), isA(RuntimeException.class), isA(List.class),
@@ -113,6 +124,7 @@ public class DefaultCommandGatewayTest {
         CompletableFuture<?> future = testSubject.send("Command");
 
         verify(mockCommandMessageTransformer).handle(isA(CommandMessage.class));
+        //noinspection rawtypes
         ArgumentCaptor<List> captor = ArgumentCaptor.forClass(List.class);
         verify(mockRetryScheduler, times(2)).scheduleRetry(isA(CommandMessage.class), isA(RuntimeException.class),
                                                            captor.capture(), isA(Runnable.class));
@@ -124,28 +136,31 @@ public class DefaultCommandGatewayTest {
         assertTrue(future.isCompletedExceptionally());
     }
 
-    @SuppressWarnings({"unchecked", "serial"})
+    @SuppressWarnings({"unchecked"})
     @Test
-    public void testSendWithoutCallback() throws ExecutionException, InterruptedException {
+    void testSendWithoutCallback() throws ExecutionException, InterruptedException {
         doAnswer(invocation -> {
-            ((CommandCallback) invocation.getArguments()[1])
-                    .onResult((CommandMessage) invocation.getArguments()[0], asCommandResultMessage("returnValue"));
+            ((CommandCallback<Object, Object>) invocation.getArguments()[1]).onResult(
+                    (CommandMessage<Object>) invocation.getArguments()[0],
+                    asCommandResultMessage("returnValue")
+            );
             return null;
         }).when(mockCommandBus).dispatch(isA(CommandMessage.class), isA(CommandCallback.class));
 
         CompletableFuture<?> future = testSubject.send("Command");
 
         assertTrue(future.isDone());
-        assertEquals(future.get(), "returnValue");
+        assertEquals("returnValue", future.get());
     }
 
-    @SuppressWarnings({"unchecked", "serial"})
+    @SuppressWarnings({"unchecked"})
     @Test
-    public void testSendAndWaitCommandIsRetried() {
+    void testSendAndWaitCommandIsRetried() {
         final RuntimeException failure = new RuntimeException(new RuntimeException());
         doAnswer(invocation -> {
-            ((CommandCallback) invocation.getArguments()[1]).onResult((CommandMessage) invocation.getArguments()[0],
-                                                                       asCommandResultMessage(failure));
+            ((CommandCallback<Object, Object>) invocation.getArguments()[1]).onResult(
+                    (CommandMessage<Object>) invocation.getArguments()[0], asCommandResultMessage(failure)
+            );
             return null;
         }).when(mockCommandBus).dispatch(isA(CommandMessage.class), isA(CommandCallback.class));
         when(mockRetryScheduler.scheduleRetry(isA(CommandMessage.class), isA(RuntimeException.class), isA(List.class),
@@ -160,6 +175,7 @@ public class DefaultCommandGatewayTest {
         }
 
         verify(mockCommandMessageTransformer).handle(isA(CommandMessage.class));
+        //noinspection rawtypes
         ArgumentCaptor<List> captor = ArgumentCaptor.forClass(List.class);
         verify(mockRetryScheduler, times(2)).scheduleRetry(isA(CommandMessage.class), isA(RuntimeException.class),
                                                            captor.capture(), isA(Runnable.class));
@@ -169,13 +185,14 @@ public class DefaultCommandGatewayTest {
         assertEquals(2, ((Class<? extends Throwable>[]) captor.getValue().get(0)).length);
     }
 
-    @SuppressWarnings({"unchecked", "serial"})
+    @SuppressWarnings({"unchecked"})
     @Test
-    public void testSendAndWaitWithTimeoutCommandIsRetried() {
+    void testSendAndWaitWithTimeoutCommandIsRetried() {
         final RuntimeException failure = new RuntimeException(new RuntimeException());
         doAnswer(invocation -> {
-            ((CommandCallback) invocation.getArguments()[1]).onResult((CommandMessage) invocation.getArguments()[0],
-                                                                       asCommandResultMessage(failure));
+            ((CommandCallback<Object, Object>) invocation.getArguments()[1]).onResult(
+                    (CommandMessage<Object>) invocation.getArguments()[0], asCommandResultMessage(failure)
+            );
             return null;
         }).when(mockCommandBus).dispatch(isA(CommandMessage.class), isA(CommandCallback.class));
         when(mockRetryScheduler.scheduleRetry(isA(CommandMessage.class), isA(RuntimeException.class), isA(List.class),
@@ -190,6 +207,7 @@ public class DefaultCommandGatewayTest {
         }
 
         verify(mockCommandMessageTransformer).handle(isA(CommandMessage.class));
+        //noinspection rawtypes
         ArgumentCaptor<List> captor = ArgumentCaptor.forClass(List.class);
         verify(mockRetryScheduler, times(2)).scheduleRetry(isA(CommandMessage.class), isA(RuntimeException.class),
                                                            captor.capture(), isA(Runnable.class));
@@ -201,20 +219,20 @@ public class DefaultCommandGatewayTest {
 
     @SuppressWarnings("unchecked")
     @Test
-    public void testSendAndWaitNullOnInterrupt() {
+    void testSendAndWaitNullOnInterrupt() {
         doAnswer(invocation -> {
             Thread.currentThread().interrupt();
             return null;
         }).when(mockCommandBus).dispatch(isA(CommandMessage.class), isA(CommandCallback.class));
 
         assertNull(testSubject.sendAndWait("Hello"));
-        assertTrue("Interrupt flag should be set on thread", Thread.interrupted());
+        assertTrue(Thread.interrupted(), "Interrupt flag should be set on thread");
         verify(mockCommandBus).dispatch(isA(CommandMessage.class), isA(CommandCallback.class));
     }
 
     @SuppressWarnings("unchecked")
     @Test
-    public void testSendAndWaitWithTimeoutNullOnInterrupt() {
+    void testSendAndWaitWithTimeoutNullOnInterrupt() {
         doAnswer(invocation -> {
             Thread.currentThread().interrupt();
             return null;
@@ -227,13 +245,13 @@ public class DefaultCommandGatewayTest {
         } catch (CommandExecutionException e) {
             assertTrue(e.getCause() instanceof InterruptedException);
         }
-        assertTrue("Interrupt flag should be set on thread", Thread.interrupted());
+        assertTrue(Thread.interrupted(), "Interrupt flag should be set on thread");
         verify(mockCommandBus).dispatch(isA(CommandMessage.class), isA(CommandCallback.class));
     }
 
     @SuppressWarnings("unchecked")
     @Test
-    public void testSendAndWaitWithTimeoutNullOnTimeout() {
+    void testSendAndWaitWithTimeoutNullOnTimeout() {
         try {
             assertNull(testSubject.sendAndWait("Hello", 10, TimeUnit.MILLISECONDS));
             fail("Expected interrupted exception");
@@ -245,7 +263,7 @@ public class DefaultCommandGatewayTest {
 
     @SuppressWarnings("unchecked")
     @Test
-    public void testCorrelationDataIsAttachedToCommandAsObject() {
+    void testCorrelationDataIsAttachedToCommandAsObject() {
         UnitOfWork<CommandMessage<?>> unitOfWork = DefaultUnitOfWork.startAndGet(null);
         unitOfWork.registerCorrelationDataProvider(message -> Collections.singletonMap("correlationId", "test"));
         testSubject.send("Hello");
@@ -258,7 +276,7 @@ public class DefaultCommandGatewayTest {
 
     @SuppressWarnings("unchecked")
     @Test
-    public void testCorrelationDataIsAttachedToCommandAsMessage() {
+    void testCorrelationDataIsAttachedToCommandAsMessage() {
         final Map<String, String> data = new HashMap<>();
         data.put("correlationId", "test");
         data.put("header", "someValue");
@@ -273,10 +291,12 @@ public class DefaultCommandGatewayTest {
     }
 
     @Test
-    public void testPayloadExtractionProblemsReportedInException() throws ExecutionException, InterruptedException {
+    void testPayloadExtractionProblemsReportedInException() throws ExecutionException, InterruptedException {
         doAnswer(i -> {
-            CommandCallback<String,String> callback = i.getArgument(1);
+            CommandCallback<String, String> callback = i.getArgument(1);
             callback.onResult(i.getArgument(0), new GenericCommandResultMessage<String>("result") {
+                private static final long serialVersionUID = -5443344481326465863L;
+
                 @Override
                 public String getPayload() {
                     throw new MockException("Faking serialization problem");

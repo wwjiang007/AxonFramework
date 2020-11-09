@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2010-2018. Axon Framework
+ * Copyright (c) 2010-2020. Axon Framework
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,7 +16,13 @@
 
 package org.axonframework.modelling.command;
 
-import org.axonframework.commandhandling.*;
+import org.axonframework.commandhandling.AnnotationCommandHandlerAdapter;
+import org.axonframework.commandhandling.CommandBus;
+import org.axonframework.commandhandling.CommandHandler;
+import org.axonframework.commandhandling.CommandMessage;
+import org.axonframework.commandhandling.CommandMessageHandler;
+import org.axonframework.commandhandling.CommandMessageHandlingMember;
+import org.axonframework.commandhandling.NoHandlerForCommandException;
 import org.axonframework.common.AxonConfigurationException;
 import org.axonframework.common.Registration;
 import org.axonframework.messaging.MessageHandler;
@@ -26,11 +32,22 @@ import org.axonframework.messaging.annotation.MessageHandlingMember;
 import org.axonframework.messaging.annotation.ParameterResolverFactory;
 import org.axonframework.modelling.command.inspection.AggregateModel;
 import org.axonframework.modelling.command.inspection.AnnotatedAggregateMetaModelFactory;
+import org.axonframework.modelling.command.inspection.CreationPolicyMember;
 
-import java.util.*;
+import java.lang.reflect.Method;
+import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Objects;
+import java.util.Optional;
+import java.util.Set;
+import java.util.concurrent.Callable;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
 
 import static org.axonframework.common.BuilderUtils.assertNonNull;
+import static org.axonframework.common.BuilderUtils.assertThat;
+import static org.axonframework.modelling.command.AggregateCreationPolicy.NEVER;
 
 /**
  * Command handler that handles commands based on {@link CommandHandler} annotations on an aggregate. Those annotations
@@ -103,18 +120,49 @@ public class AggregateAnnotationCommandHandler<T> implements CommandMessageHandl
 
     private List<MessageHandler<CommandMessage<?>>> initializeHandlers(AggregateModel<T> aggregateModel) {
         List<MessageHandler<CommandMessage<?>>> handlersFound = new ArrayList<>();
-        aggregateModel.commandHandlers().forEach(handler -> {
-            handler.unwrap(CommandMessageHandlingMember.class).ifPresent(cmh -> {
-                if (cmh.isFactoryHandler()) {
-                    handlersFound.add(new AggregateConstructorCommandHandler(handler));
-                    supportedCommandNames.add(cmh.commandName());
-                } else {
-                    handlersFound.add(new AggregateCommandHandler(handler));
-                    supportedCommandNames.add(cmh.commandName());
-                }
-            });
-        });
+        aggregateModel.allCommandHandlers()
+                      .values()
+                      .stream()
+                      .flatMap(List::stream)
+                      .forEach(handler -> initializeHandler(aggregateModel, handler, handlersFound));
         return handlersFound;
+    }
+
+    private void initializeHandler(AggregateModel<T> aggregateModel,
+                                   MessageHandlingMember<? super T> handler,
+                                   List<MessageHandler<CommandMessage<?>>> handlersFound) {
+
+
+        handler.unwrap(CommandMessageHandlingMember.class).ifPresent(cmh -> {
+            Optional<AggregateCreationPolicy> policy = handler.unwrap(CreationPolicyMember.class)
+                                                              .map(CreationPolicyMember::creationPolicy);
+
+            if (cmh.isFactoryHandler()) {
+                assertThat(
+                        policy,
+                        p -> p.map(AggregateCreationPolicy.ALWAYS::equals).orElse(true),
+                        aggregateModel.type() + ": Static methods/constructors can only use creationPolicy ALWAYS"
+                );
+                handlersFound.add(new AggregateConstructorCommandHandler(handler));
+            } else {
+                switch (policy.orElse(NEVER)) {
+                    case ALWAYS:
+                        handlersFound.add(new AlwaysCreateAggregateCommandHandler(
+                                handler, aggregateModel.entityClass()::newInstance
+                        ));
+                        break;
+                    case CREATE_IF_MISSING:
+                        handlersFound.add(new AggregateCreateOrUpdateCommandHandler(
+                                handler, aggregateModel.entityClass()::newInstance
+                        ));
+                        break;
+                    case NEVER:
+                        handlersFound.add(new AggregateCommandHandler(handler));
+                        break;
+                }
+            }
+            supportedCommandNames.add(cmh.commandName());
+        });
     }
 
     @Override
@@ -334,6 +382,75 @@ public class AggregateAnnotationCommandHandler<T> implements CommandMessageHandl
         }
     }
 
+    private class AlwaysCreateAggregateCommandHandler implements MessageHandler<CommandMessage<?>> {
+
+        private final MessageHandlingMember<? super T> handler;
+        private final Callable<T> factoryMethod;
+
+        private AlwaysCreateAggregateCommandHandler(MessageHandlingMember<? super T> handler,
+                                                    Callable<T> factoryMethod) {
+            this.handler = handler;
+            this.factoryMethod = factoryMethod;
+        }
+
+        @Override
+        public Object handle(CommandMessage<?> command) throws Exception {
+            AtomicReference<Object> resultReference = new AtomicReference<>();
+            Aggregate<T> aggregate = repository.newInstance(() -> {
+                T newInstance = factoryMethod.call();
+                resultReference.set(handler.handle(command, newInstance));
+                return newInstance;
+            });
+            return handlerHasVoidReturnType() ? resolveReturnValue(command, aggregate) : resultReference.get();
+        }
+
+        public boolean handlerHasVoidReturnType() {
+            return handler.unwrap(Method.class)
+                          .map(Method::getReturnType)
+                          .filter(void.class::equals)
+                          .isPresent();
+        }
+
+        @Override
+        public boolean canHandle(CommandMessage<?> message) {
+            return handler.canHandle(message);
+        }
+    }
+
+    private class AggregateCreateOrUpdateCommandHandler implements MessageHandler<CommandMessage<?>> {
+
+        private final MessageHandlingMember<? super T> handler;
+        private final Callable<T> factoryMethod;
+
+        public AggregateCreateOrUpdateCommandHandler(MessageHandlingMember<? super T> handler,
+                                                     Callable<T> factoryMethod) {
+            this.handler = handler;
+            this.factoryMethod = factoryMethod;
+        }
+
+        @Override
+        public Object handle(CommandMessage<?> command) throws Exception {
+            VersionedAggregateIdentifier commandMessageVersionedId = commandTargetResolver.resolveTarget(command);
+            String commandMessageAggregateId = commandMessageVersionedId.getIdentifier();
+
+            Aggregate<T> instance = repository.loadOrCreate(commandMessageAggregateId, factoryMethod);
+            Object commandResult = instance.handle(command);
+            Object aggregateId = instance.identifier();
+
+            assertThat(
+                    aggregateId,
+                    id -> id != null && id.toString() != null && id.toString().equals(commandMessageAggregateId),
+                    "Identifier must be set after handling the message"
+            );
+            return commandResult;
+        }
+
+        @Override
+        public boolean canHandle(CommandMessage<?> message) {
+            return handler.canHandle(message);
+        }
+    }
+
     private class AggregateCommandHandler implements MessageHandler<CommandMessage<?>> {
 
         private final MessageHandlingMember<? super T> handler;
@@ -342,7 +459,6 @@ public class AggregateAnnotationCommandHandler<T> implements CommandMessageHandl
             this.handler = handler;
         }
 
-        @SuppressWarnings("unchecked")
         @Override
         public Object handle(CommandMessage<?> command) throws Exception {
             VersionedAggregateIdentifier iv = commandTargetResolver.resolveTarget(command);
